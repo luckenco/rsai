@@ -37,6 +37,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 
+mod common;
 mod tool;
 mod tools;
 

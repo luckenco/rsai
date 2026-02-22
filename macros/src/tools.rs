@@ -46,19 +46,6 @@ impl Parse for ToolsList {
     }
 }
 
-/// Convert a snake_case function name to PascalCase struct name
-fn to_pascal_case(name: &str) -> String {
-    name.split('_')
-        .map(|s| {
-            let mut c = s.chars();
-            match c.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-            }
-        })
-        .collect()
-}
-
 pub fn tools_impl(input: TokenStream) -> Result<TokenStream> {
     let tools_list = syn::parse2::<ToolsList>(input)?;
 
@@ -73,7 +60,12 @@ pub fn tools_impl(input: TokenStream) -> Result<TokenStream> {
     let wrapper_names: Vec<_> = tools_list
         .tools
         .iter()
-        .map(|tool_name| quote::format_ident!("{}Tool", to_pascal_case(&tool_name.to_string())))
+        .map(|tool_name| {
+            quote::format_ident!(
+                "{}Tool",
+                crate::common::to_pascal_case(&tool_name.to_string())
+            )
+        })
         .collect();
 
     // Generate different code based on whether context is present

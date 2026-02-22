@@ -211,7 +211,7 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
                         result: result.clone(),
                     });
 
-                    // If not parallel, process one at a time
+                    // In sequential mode process one call per model turn.
                     if !is_parallel {
                         break;
                     }
@@ -225,7 +225,7 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
 }
 
 /// Convert core messages to conversation items.
-fn convert_messages_to_conversation(
+pub(crate) fn convert_messages_to_conversation(
     messages: &[crate::core::ConversationMessage],
 ) -> Result<Vec<ConversationItem>, LlmError> {
     messages

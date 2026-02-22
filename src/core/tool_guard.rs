@@ -61,11 +61,7 @@ impl ToolCallingGuard {
 
     /// Create a new ToolCallingGuard from a config
     pub fn from_config(config: &ToolCallingConfig) -> Self {
-        Self {
-            max_iterations: config.max_iterations,
-            timeout: config.timeout,
-            current_iteration: 0,
-        }
+        Self::with_limits(config.max_iterations, config.timeout)
     }
 
     /// Increment iteration count and check if limit is exceeded

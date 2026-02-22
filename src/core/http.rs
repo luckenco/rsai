@@ -82,16 +82,14 @@ impl HttpClient {
         Req: Serialize,
         Res: DeserializeOwned,
     {
-        // Serialize request to Value for inspection
-        let body_value = serde_json::to_value(body).map_err(|e| LlmError::Parse {
-            message: "Failed to serialize request for inspection".to_string(),
-            source: Box::new(e),
-        })?;
-
-        // Call request inspector
+        // Only serialize to Value if we need to inspect the request
         if let Some(ref config) = self.inspector_config
             && let Some(ref inspector) = config.request_inspector
         {
+            let body_value = serde_json::to_value(body).map_err(|e| LlmError::Parse {
+                message: "Failed to serialize request for inspection".to_string(),
+                source: Box::new(e),
+            })?;
             inspector(&body_value);
         }
 
@@ -99,7 +97,7 @@ impl HttpClient {
 
         for attempt in 0..=self.config.max_retries {
             // Build request (must be rebuilt each attempt since .send() consumes it)
-            let mut req_builder = self.client.post(url).json(&body_value);
+            let mut req_builder = self.client.post(url).json(body);
 
             // Add headers
             for (name, value) in headers {
@@ -125,31 +123,34 @@ impl HttpClient {
                     if status.is_success() {
                         debug!(status = %status, "HTTP request successful");
 
-                        // Parse response to text first, then to Value for inspection
                         let response_text = res.text().await.map_err(|e| LlmError::Parse {
                             message: "Failed to read response body".to_string(),
                             source: Box::new(e),
                         })?;
 
-                        let response_value: serde_json::Value =
-                            serde_json::from_str(&response_text).map_err(|e| LlmError::Parse {
-                                message: "Failed to parse response as JSON".to_string(),
-                                source: Box::new(e),
-                            })?;
-
-                        // Call response inspector
+                        // Only go through intermediate Value if we need to inspect
                         if let Some(ref config) = self.inspector_config
                             && let Some(ref inspector) = config.response_inspector
                         {
+                            let response_value: serde_json::Value =
+                                serde_json::from_str(&response_text).map_err(|e| {
+                                    LlmError::Parse {
+                                        message: "Failed to parse response as JSON".to_string(),
+                                        source: Box::new(e),
+                                    }
+                                })?;
                             inspector(&response_value);
+                            return serde_json::from_value(response_value).map_err(|e| {
+                                LlmError::Parse {
+                                    message: "Failed to parse API response".to_string(),
+                                    source: Box::new(e),
+                                }
+                            });
                         }
 
-                        // Deserialize to target type
-                        return serde_json::from_value(response_value).map_err(|e| {
-                            LlmError::Parse {
-                                message: "Failed to parse API response".to_string(),
-                                source: Box::new(e),
-                            }
+                        return serde_json::from_str(&response_text).map_err(|e| LlmError::Parse {
+                            message: "Failed to parse API response".to_string(),
+                            source: Box::new(e),
                         });
                     }
 

@@ -56,6 +56,6 @@ pub enum LlmError {
     #[error("Tool call processing timeout exceeded: {timeout:?}")]
     ToolCallTimeout { timeout: std::time::Duration },
 
-    #[error("Toll registration failed for {tool_name}: {message}")]
+    #[error("Tool registration failed for {tool_name}: {message}")]
     ToolRegistration { tool_name: String, message: String },
 }

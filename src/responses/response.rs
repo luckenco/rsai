@@ -11,9 +11,11 @@ pub struct Response {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "type")]
 pub enum OutputContent {
+    #[serde(rename = "message")]
     OutputMessage(OutputMessage),
+    #[serde(rename = "function_call")]
     FunctionCall(FunctionToolCall),
 }
 
@@ -24,22 +26,12 @@ pub struct Usage {
     pub total_tokens: i32,
 }
 
-// TODO: Remove this, once text input is supported
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct OutputMessage {
     pub id: String,
-
-    #[allow(dead_code)]
-    /// This is always `message`
-    #[serde(rename = "type")]
-    pub r#type: String,
-
     pub status: Status,
-
     pub content: Vec<MessageContent>,
-
-    /// This is always `assistant`
     pub role: String,
 }
 
@@ -52,31 +44,71 @@ pub enum Status {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged, rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum MessageContent {
+    #[serde(rename = "output_text")]
     OutputText(OutputText),
+    #[serde(rename = "refusal")]
     Refusal(Refusal),
 }
 
 #[derive(Debug, Deserialize)]
 pub struct OutputText {
-    #[allow(dead_code)]
-    /// Always `output_text`
-    #[serde(rename = "type")]
-    pub r#type: String,
-
     pub text: String,
-    // TODO
-    // annotations
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Refusal {
-    /// The refusal explanation from the model.
     pub refusal: String,
+}
 
-    #[allow(dead_code)]
-    /// Always `refusal`
-    #[serde(rename = "type")]
-    pub r#type: String,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tagged_function_call_deserializes() {
+        let payload = json!({
+            "type": "function_call",
+            "id": "tool_1",
+            "call_id": "tool_1",
+            "name": "lookup_weather",
+            "arguments": "{\"city\":\"Lisbon\"}"
+        });
+
+        let parsed: OutputContent =
+            serde_json::from_value(payload).expect("function_call should deserialize");
+
+        match parsed {
+            OutputContent::FunctionCall(call) => {
+                assert_eq!(call.name, "lookup_weather");
+                assert_eq!(call.call_id, "tool_1");
+            }
+            _ => panic!("expected function_call output content"),
+        }
+    }
+
+    /// The `type` field is consumed by the tagged enum during deserialization,
+    /// so `FunctionToolCall.r#type` is populated by its serde default.
+    /// Verify it still serializes correctly for use as an API input item.
+    #[test]
+    fn function_call_round_trips_with_type_field() {
+        let payload = json!({
+            "type": "function_call",
+            "id": "tool_1",
+            "call_id": "tool_1",
+            "name": "lookup_weather",
+            "arguments": "{\"city\":\"Lisbon\"}"
+        });
+
+        let parsed: OutputContent = serde_json::from_value(payload).expect("should deserialize");
+
+        let OutputContent::FunctionCall(call) = parsed else {
+            panic!("expected function_call");
+        };
+
+        let serialized = serde_json::to_value(&call).expect("should serialize");
+        assert_eq!(serialized["type"], "function_call");
+    }
 }

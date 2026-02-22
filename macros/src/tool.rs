@@ -31,17 +31,7 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     // Generate the wrapper struct name
     let wrapper_name = quote::format_ident!(
         "{}Tool",
-        fn_name
-            .to_string()
-            .split('_')
-            .map(|s| {
-                let mut c = s.chars();
-                match c.next() {
-                    None => String::new(),
-                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                }
-            })
-            .collect::<String>()
+        crate::common::to_pascal_case(&fn_name.to_string())
     );
 
     // Check if function is async

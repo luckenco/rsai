@@ -57,17 +57,16 @@ impl OpenAiConfig {
         self
     }
 
-    pub fn get_tool_calling_guard(&self) -> ToolCallingGuard {
-        if let Some(ref config) = self.tool_calling_config {
-            ToolCallingGuard::with_limits(config.max_iterations, config.timeout)
-        } else {
-            ToolCallingGuard::new()
-        }
-    }
-
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Self {
         self.http_config = config;
         self
+    }
+
+    pub fn get_tool_calling_guard(&self) -> ToolCallingGuard {
+        match self.tool_calling_config {
+            Some(ref config) => ToolCallingGuard::from_config(config),
+            None => ToolCallingGuard::default(),
+        }
     }
 }
 
@@ -176,35 +175,10 @@ impl LlmProvider for OpenAiClient {
         T: crate::CompletionTarget + Send,
         Ctx: Send + Sync + 'static,
     {
-        // If tools are present and we have a registry, handle automatic tool calling
-        let has_tools = request
-            .tool_config
-            .as_ref()
-            .and_then(|tc| tc.tools.as_ref())
-            .is_some();
-
-        if has_tools && let Some(tool_registry) = tool_registry {
-            let mut guard = self.responses_client.config.get_tool_calling_guard();
-            return self
-                .responses_client
-                .handle_tool_calling_loop::<T, Ctx>(request, tool_registry, &mut guard, format)
-                .await;
-        }
-
-        // Otherwise, make a single request expecting the configured completion output
-        let messages_clone = request.messages.clone();
-        let responses_request = self.responses_client.build_request_with_format(
-            &request,
-            &crate::responses::convert_messages_to_responses_format(messages_clone)?,
-            format,
-        )?;
-        let api_response = self
-            .responses_client
-            .make_api_request(responses_request)
-            .await?;
-        let provider_response =
-            crate::responses::convert_to_provider_response(api_response, super::Provider::OpenAI)?;
-        T::parse_response(provider_response)
+        let guard = self.responses_client.config.get_tool_calling_guard();
+        self.responses_client
+            .generate_completion::<T, Ctx>(request, format, tool_registry, guard)
+            .await
     }
 }
 

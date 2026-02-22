@@ -402,84 +402,44 @@ impl<State: private::Completable, Ctx: Send + Sync + 'static> LlmBuilder<State, 
             None
         };
 
+        let conversation_messages: Vec<ConversationMessage> = messages
+            .into_iter()
+            .map(ConversationMessage::Chat)
+            .collect();
+
+        let req = StructuredRequest {
+            model: model_string,
+            messages: conversation_messages,
+            tool_config: tool_schemas.map(|tools| ToolConfig {
+                tools: Some(tools),
+                tool_choice: self.fields.tool_choice.clone(),
+                parallel_tool_calls: self.fields.parallel_tool_calls,
+            }),
+            generation_config: Some(GenerationConfig {
+                max_tokens: self.fields.max_tokens,
+                temperature: self.fields.temperature,
+                top_p: self.fields.top_p,
+            }),
+        };
+
+        let tool_registry = self.fields.tool_registry.as_ref();
         match provider {
             Provider::OpenAI => {
-                let conversation_messages: Vec<ConversationMessage> = messages
-                    .into_iter()
-                    .map(ConversationMessage::Chat)
-                    .collect();
-
-                let req = StructuredRequest {
-                    model: model_string,
-                    messages: conversation_messages,
-                    tool_config: tool_schemas.map(|tools| ToolConfig {
-                        tools: Some(tools),
-                        tool_choice: self.fields.tool_choice.clone(),
-                        parallel_tool_calls: self.fields.parallel_tool_calls,
-                    }),
-                    generation_config: Some(GenerationConfig {
-                        max_tokens: self.fields.max_tokens,
-                        temperature: self.fields.temperature,
-                        top_p: self.fields.top_p,
-                    }),
-                };
                 let client = openai::create_openai_client_from_builder(&self)?;
                 client
-                    .generate_completion::<T, Ctx>(
-                        req,
-                        format.clone(),
-                        self.fields.tool_registry.as_ref(),
-                    )
+                    .generate_completion::<T, Ctx>(req, format, tool_registry)
                     .await
             }
             Provider::OpenRouter => {
-                let conversation_messages: Vec<ConversationMessage> = messages
-                    .into_iter()
-                    .map(ConversationMessage::Chat)
-                    .collect();
-
-                let req = StructuredRequest {
-                    model: model_string,
-                    messages: conversation_messages,
-                    tool_config: tool_schemas.map(|tools| ToolConfig {
-                        tools: Some(tools),
-                        tool_choice: self.fields.tool_choice.clone(),
-                        parallel_tool_calls: self.fields.parallel_tool_calls,
-                    }),
-                    generation_config: Some(GenerationConfig {
-                        max_tokens: self.fields.max_tokens,
-                        temperature: self.fields.temperature,
-                        top_p: self.fields.top_p,
-                    }),
-                };
                 let client = openrouter::create_openrouter_client_from_builder(&self)?;
                 client
-                    .generate_completion::<T, Ctx>(req, format, self.fields.tool_registry.as_ref())
+                    .generate_completion::<T, Ctx>(req, format, tool_registry)
                     .await
             }
             Provider::Gemini => {
-                let conversation_messages: Vec<ConversationMessage> = messages
-                    .into_iter()
-                    .map(ConversationMessage::Chat)
-                    .collect();
-
-                let req = StructuredRequest {
-                    model: model_string,
-                    messages: conversation_messages,
-                    tool_config: tool_schemas.map(|tools| ToolConfig {
-                        tools: Some(tools),
-                        tool_choice: self.fields.tool_choice.clone(),
-                        parallel_tool_calls: self.fields.parallel_tool_calls,
-                    }),
-                    generation_config: Some(GenerationConfig {
-                        max_tokens: self.fields.max_tokens,
-                        temperature: self.fields.temperature,
-                        top_p: self.fields.top_p,
-                    }),
-                };
                 let client = gemini::create_gemini_client_from_builder(&self)?;
                 client
-                    .generate_completion::<T, Ctx>(req, format, self.fields.tool_registry.as_ref())
+                    .generate_completion::<T, Ctx>(req, format, tool_registry)
                     .await
             }
         }

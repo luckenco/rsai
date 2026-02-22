@@ -112,7 +112,6 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
     {
         let timeout_duration = guard.timeout;
 
-        // Use tokio::time::timeout to add timeout protection
         match tokio::time::timeout(
             timeout_duration,
             self.handle_tool_calling_loop_internal::<T, Ctx>(request, tool_registry, guard, format),
@@ -156,7 +155,6 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
             .unwrap_or(true);
 
         loop {
-            // Check iteration limit before processing
             guard.increment_iteration()?;
 
             let iteration_span =
@@ -236,7 +234,9 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         }
     }
 
-    /// Process function calls in parallel (all calls first, then all results)
+    /// Process function calls in parallel (all calls added first, tools executed concurrently, then all results added).
+    ///
+    /// On failure, completed tools may have produced side-effects but no results are added to `responses_input`.
     pub async fn process_parallel_function_calls<Ctx>(
         &self,
         function_calls: &[&FunctionToolCall],
@@ -246,33 +246,31 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
     where
         Ctx: Send + Sync + 'static,
     {
-        let mut pending_executions = Vec::new();
-
-        // Add all function calls to input and prepare for execution
+        // Add all function calls to input first
+        let mut tool_calls = Vec::with_capacity(function_calls.len());
         for function_call in function_calls {
             responses_input.push(InputItem::FunctionCall((*function_call).clone()));
 
             let arguments = self.parse_function_arguments(&function_call.arguments)?;
-            pending_executions.push((
-                function_call.id.clone(),
-                function_call.call_id.clone(),
-                function_call.name.clone(),
+            tool_calls.push(ToolCall {
+                id: function_call.id.clone(),
+                call_id: function_call.call_id.clone(),
+                name: function_call.name.clone(),
                 arguments,
-            ));
+            });
         }
 
-        // Execute all tools and add their results
-        for (id, call_id, name, arguments) in pending_executions {
-            let tool_call = ToolCall {
-                id,
-                call_id: call_id.clone(),
-                name,
-                arguments,
-            };
-            let result = tool_registry.execute(&tool_call).await?;
+        // Execute all tools concurrently
+        let futures: Vec<_> = tool_calls
+            .iter()
+            .map(|tc| tool_registry.execute(tc))
+            .collect();
+        let results = futures::future::try_join_all(futures).await?;
 
+        // Add all results in order
+        for (tool_call, result) in tool_calls.iter().zip(results) {
             responses_input.push(InputItem::FunctionCallOutput(FunctionToolCallOutput {
-                call_id,
+                call_id: tool_call.call_id.clone(),
                 output: result,
                 r#type: "function_call_output".to_string(),
             }));
@@ -312,6 +310,41 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         }
 
         Ok(())
+    }
+
+    /// Shared generate_completion for responses-API providers (OpenAI, OpenRouter).
+    ///
+    /// Handles the tool calling loop when tools are present, or makes a single
+    /// request otherwise.
+    pub async fn generate_completion<T, Ctx>(
+        &self,
+        request: StructuredRequest,
+        format: crate::responses::request::Format,
+        tool_registry: Option<&ToolRegistry<Ctx>>,
+        mut guard: ToolCallingGuard,
+    ) -> Result<T::Output, LlmError>
+    where
+        T: CompletionTarget + Send,
+        Ctx: Send + Sync + 'static,
+    {
+        let has_tools = request
+            .tool_config
+            .as_ref()
+            .and_then(|tc| tc.tools.as_ref())
+            .is_some();
+
+        if has_tools && let Some(tool_registry) = tool_registry {
+            return self
+                .handle_tool_calling_loop::<T, Ctx>(request, tool_registry, &mut guard, format)
+                .await;
+        }
+
+        let responses_input = convert_messages_to_responses_format(request.messages.clone())?;
+        let responses_request =
+            self.build_request_with_format(&request, &responses_input, format)?;
+        let api_response = self.make_api_request(responses_request).await?;
+        let provider_response = convert_to_provider_response(api_response, self.config.provider())?;
+        T::parse_response(provider_response)
     }
 
     /// Parse function arguments from JSON value
@@ -510,58 +543,52 @@ pub(crate) fn create_text_format() -> Format {
     }
 }
 
-/// Convert OpenAI API response to provider-agnostic ProviderResponse
+/// Convert OpenAI API response to provider-agnostic ProviderResponse.
+///
+/// Aggregates all output items: collects function calls across all items,
+/// concatenates text from all messages, and surfaces refusals.
+/// Function calls take priority over text if both are present.
 pub fn convert_to_provider_response(
     res: Response,
     provider: crate::provider::Provider,
 ) -> Result<crate::core::ProviderResponse, LlmError> {
     use crate::core::{FunctionCallData, LanguageModelUsage, ProviderResponse, ResponseContent};
 
-    let output_content = res.output.first().ok_or_else(|| LlmError::Provider {
-        message: "No output in response".to_string(),
-        source: None,
-    })?;
+    let mut function_calls = Vec::new();
+    let mut text_parts = Vec::new();
+    let mut refusal = None;
 
-    let content = match output_content {
-        OutputContent::OutputMessage(message) => {
-            let msg_content = message.content.first().ok_or_else(|| LlmError::Provider {
-                message: "No content in message".to_string(),
-                source: None,
-            })?;
-
-            match msg_content {
-                MessageContent::OutputText(output) => ResponseContent::Text(output.text.clone()),
-                MessageContent::Refusal(refusal) => {
-                    ResponseContent::Refusal(refusal.refusal.clone())
+    for output in &res.output {
+        match output {
+            OutputContent::OutputMessage(message) => {
+                for content in &message.content {
+                    match content {
+                        MessageContent::OutputText(text) => text_parts.push(text.text.clone()),
+                        MessageContent::Refusal(r) => refusal = Some(r.refusal.clone()),
+                    }
                 }
             }
-        }
-        OutputContent::FunctionCall(fc) => {
-            // Collect all function calls from the output
-            let function_calls: Vec<FunctionCallData> = res
-                .output
-                .iter()
-                .filter_map(|o| match o {
-                    OutputContent::FunctionCall(fc) => Some(FunctionCallData {
-                        id: fc.call_id.clone(),
-                        name: fc.name.clone(),
-                        arguments: fc.arguments.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect();
-
-            if function_calls.is_empty() {
-                // This shouldn't happen since we matched FunctionCall, but handle it
-                ResponseContent::FunctionCalls(vec![FunctionCallData {
+            OutputContent::FunctionCall(fc) => {
+                function_calls.push(FunctionCallData {
                     id: fc.call_id.clone(),
                     name: fc.name.clone(),
                     arguments: fc.arguments.clone(),
-                }])
-            } else {
-                ResponseContent::FunctionCalls(function_calls)
+                });
             }
         }
+    }
+
+    let content = if !function_calls.is_empty() {
+        ResponseContent::FunctionCalls(function_calls)
+    } else if let Some(refusal) = refusal {
+        ResponseContent::Refusal(refusal)
+    } else if !text_parts.is_empty() {
+        ResponseContent::Text(text_parts.join(""))
+    } else {
+        return Err(LlmError::Provider {
+            message: "No output in response".to_string(),
+            source: None,
+        });
     };
 
     Ok(ProviderResponse {

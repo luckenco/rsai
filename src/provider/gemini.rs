@@ -342,16 +342,7 @@ impl CompletionRequestBuilder for GeminiRequestBuilder {
         let candidate = response.candidates.as_ref()?.first()?;
         let content = candidate.content.as_ref()?;
 
-        let mut calls = Vec::new();
-        for (idx, part) in content.parts.iter().enumerate() {
-            if let Part::FunctionCall(FunctionCallPart { function_call }) = part {
-                calls.push(FunctionCallData {
-                    id: format!("call_{}", idx),
-                    name: function_call.name.clone(),
-                    arguments: function_call.args.clone(),
-                });
-            }
-        }
+        let calls: Vec<FunctionCallData> = extract_function_calls_from_parts(&content.parts);
 
         if calls.is_empty() { None } else { Some(calls) }
     }
@@ -565,28 +556,42 @@ fn build_tools_config(
     )
 }
 
-fn parse_parts_to_content(parts: &[Part]) -> Result<ResponseContent, LlmError> {
-    let mut text_parts = Vec::new();
-    let mut function_calls = Vec::new();
-
-    for (idx, part) in parts.iter().enumerate() {
-        match part {
-            Part::Text(TextPart { text }) => text_parts.push(text.clone()),
-            Part::FunctionCall(FunctionCallPart { function_call }) => {
-                function_calls.push(FunctionCallData {
-                    id: format!("call_{}", idx),
+/// Extract function calls from Gemini response parts with unique IDs.
+fn extract_function_calls_from_parts(parts: &[Part]) -> Vec<FunctionCallData> {
+    parts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, part)| {
+            if let Part::FunctionCall(FunctionCallPart { function_call }) = part {
+                Some(FunctionCallData {
+                    id: format!("call_{}_{:08x}", idx, rand::random::<u32>()),
                     name: function_call.name.clone(),
                     arguments: function_call.args.clone(),
-                });
+                })
+            } else {
+                None
             }
-            Part::FunctionResponse(_) => {}
-        }
+        })
+        .collect()
+}
+
+fn parse_parts_to_content(parts: &[Part]) -> Result<ResponseContent, LlmError> {
+    let function_calls = extract_function_calls_from_parts(parts);
+    if !function_calls.is_empty() {
+        return Ok(ResponseContent::FunctionCalls(function_calls));
     }
 
-    if !function_calls.is_empty() {
-        Ok(ResponseContent::FunctionCalls(function_calls))
-    } else if !text_parts.is_empty() {
-        Ok(ResponseContent::Text(text_parts.join("")))
+    let text: String = parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Text(TextPart { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    if !text.is_empty() {
+        Ok(ResponseContent::Text(text))
     } else {
         Err(LlmError::Provider {
             message: "Empty response from Gemini".to_string(),
@@ -601,34 +606,24 @@ fn parse_parts_to_content(parts: &[Part]) -> Result<ResponseContent, LlmError> {
 
 pub struct GeminiClient {
     completion_client: CompletionClient<GeminiConfig>,
-    config: GeminiConfig,
 }
 
 impl GeminiClient {
     pub fn new(api_key: String) -> Result<Self, LlmError> {
-        let config = GeminiConfig::new(api_key.clone());
-        let completion_client = CompletionClient::new(GeminiConfig::new(api_key))?;
-
+        let config = GeminiConfig::new(api_key);
         Ok(Self {
-            completion_client,
-            config,
+            completion_client: CompletionClient::new(config)?,
         })
     }
 
     pub fn with_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: base_url.clone(),
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: self.config.http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
-        };
-        self.config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
+            api_key: config.api_key.clone(),
             base_url,
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: self.config.http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
+            tool_calling_config: config.tool_calling_config.clone(),
+            http_config: config.http_config.clone(),
+            inspector_config: config.inspector_config.clone(),
         };
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
@@ -638,27 +633,27 @@ impl GeminiClient {
         mut self,
         tool_config: ToolCallingConfig,
     ) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: self.config.base_url.clone(),
-            tool_calling_config: Some(tool_config.clone()),
-            http_config: self.config.http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            tool_calling_config: Some(tool_config),
+            http_config: config.http_config.clone(),
+            inspector_config: config.inspector_config.clone(),
         };
-        self.config.tool_calling_config = Some(tool_config);
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
     }
 
     pub fn with_http_config(mut self, http_config: HttpClientConfig) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: self.config.base_url.clone(),
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            tool_calling_config: config.tool_calling_config.clone(),
+            http_config,
+            inspector_config: config.inspector_config.clone(),
         };
-        self.config.http_config = http_config;
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
     }
@@ -667,14 +662,14 @@ impl GeminiClient {
         mut self,
         inspector_config: InspectorConfig,
     ) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: self.config.base_url.clone(),
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: self.config.http_config.clone(),
-            inspector_config: Some(inspector_config.clone()),
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            tool_calling_config: config.tool_calling_config.clone(),
+            http_config: config.http_config.clone(),
+            inspector_config: Some(inspector_config),
         };
-        self.config.inspector_config = Some(inspector_config);
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
     }
@@ -701,14 +696,14 @@ impl LlmProvider for GeminiClient {
             .and_then(|tc| tc.tools.as_ref())
             .is_some();
 
-        if has_tools && tool_registry.is_some() {
-            let mut guard = self.config.get_tool_calling_guard();
+        if has_tools && let Some(tool_registry) = tool_registry {
+            let mut guard = self.completion_client.config.get_tool_calling_guard();
             let provider_response = self
                 .completion_client
                 .handle_tool_calling_loop::<_, Ctx>(
                     &builder,
                     request,
-                    tool_registry.unwrap(),
+                    tool_registry,
                     &mut guard,
                     format,
                 )
@@ -717,7 +712,8 @@ impl LlmProvider for GeminiClient {
         }
 
         // Single request without tool calling loop
-        let conversation = convert_messages_to_conversation(&request.messages)?;
+        let conversation =
+            crate::completions::client::convert_messages_to_conversation(&request.messages)?;
         let api_request = builder.build_request(&request, &format, &conversation)?;
         let api_response = self
             .completion_client
@@ -726,38 +722,6 @@ impl LlmProvider for GeminiClient {
         let provider_response = builder.parse_response(api_response)?;
         T::parse_response(provider_response)
     }
-}
-
-fn convert_messages_to_conversation(
-    messages: &[crate::core::ConversationMessage],
-) -> Result<Vec<ConversationItem>, LlmError> {
-    messages
-        .iter()
-        .map(|msg| match msg {
-            crate::core::ConversationMessage::Chat(m) => {
-                let role = match m.role {
-                    crate::core::ChatRole::System => "system",
-                    crate::core::ChatRole::User => "user",
-                    crate::core::ChatRole::Assistant => "assistant",
-                };
-                Ok(ConversationItem::Message {
-                    role: role.to_string(),
-                    content: m.content.clone(),
-                })
-            }
-            crate::core::ConversationMessage::ToolCall(tc) => Ok(ConversationItem::FunctionCall {
-                id: tc.call_id.clone(),
-                name: tc.name.clone(),
-                arguments: tc.arguments.clone(),
-            }),
-            crate::core::ConversationMessage::ToolCallResult(tr) => {
-                Ok(ConversationItem::FunctionResult {
-                    call_id: tr.tool_call_id.clone(),
-                    result: tr.content.clone(),
-                })
-            }
-        })
-        .collect()
 }
 
 // ============================================================================
