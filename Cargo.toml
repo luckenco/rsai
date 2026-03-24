@@ -7,6 +7,7 @@ name = "rsai"
 version = "0.3.0"
 authors = ["Constantin Luckenbach <cluckenbach@protonmail.com>"]
 edition = "2024"
+rust-version = "1.85"
 description = "Predictable development for unpredictable Gen-AI models. Let the compiler handle the chaos."
 homepage = "https://rsai.dev"
 repository = "https://github.com/caluckenbach/rsai"

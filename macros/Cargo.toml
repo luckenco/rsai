@@ -3,6 +3,7 @@ name = "rsai-macros"
 version = "0.2.0"
 authors = ["Constantin Luckenbach <cluckenbach@protonmail.com>"]
 edition = "2024"
+rust-version = "1.85"
 description = "Macros for the rsai crate providing structured AI generation capabilities"
 homepage = "https://rsai.dev"
 repository = "https://github.com/caluckenbach/rsai"
