@@ -63,7 +63,8 @@ pub use core::{ToolCallingConfig, ToolCallingGuard};
 
 // Configuration types
 pub use core::{
-    ApiKey, GenerationConfig, Inspector, InspectorConfig, LlmBuilder, ToolChoice, ToolConfig,
+    ApiKey, BaseUrlSecurity, GenerationConfig, Inspector, InspectorConfig, LlmBuilder, ToolChoice,
+    ToolConfig,
 };
 pub use responses::{Format, HttpClientConfig};
 

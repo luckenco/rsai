@@ -1,6 +1,7 @@
 use rsai::{
-    LlmError, OpenAiConfig, OpenRouterConfig, ToolCall, ToolCallingConfig, ToolChoice, ToolConfig,
-    ToolRegistry, completion_schema, tool, toolset,
+    GeminiClient, LlmError, OpenAiClient, OpenAiConfig, OpenRouterClient, OpenRouterConfig,
+    ToolCall, ToolCallingConfig, ToolChoice, ToolConfig, ToolRegistry, completion_schema, tool,
+    toolset,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -307,4 +308,49 @@ fn provider_configs_share_default_tool_calling_limits() {
         .get_tool_calling_guard();
     assert_eq!(custom_router_guard.max_iterations, 10);
     assert_eq!(custom_router_guard.timeout, Duration::from_secs(60));
+}
+
+#[test]
+fn provider_clients_reject_http_base_urls_by_default() {
+    assert_insecure_base_url_error(
+        OpenAiClient::new("test-key".to_string())
+            .expect("default OpenAI client")
+            .with_base_url("http://localhost:8080/v1".to_string()),
+    );
+    assert_insecure_base_url_error(
+        OpenRouterClient::new("test-key".to_string())
+            .expect("default OpenRouter client")
+            .with_base_url("http://localhost:8080/api/v1".to_string()),
+    );
+    assert_insecure_base_url_error(
+        GeminiClient::new("test-key".to_string())
+            .expect("default Gemini client")
+            .with_base_url("http://localhost:8080/v1beta".to_string()),
+    );
+}
+
+#[test]
+fn provider_clients_allow_http_base_urls_with_explicit_opt_out() {
+    OpenAiClient::new("test-key".to_string())
+        .expect("default OpenAI client")
+        .with_insecure_base_url("http://localhost:8080/v1".to_string())
+        .expect("explicit OpenAI HTTP opt-out");
+    OpenRouterClient::new("test-key".to_string())
+        .expect("default OpenRouter client")
+        .with_insecure_base_url("http://localhost:8080/api/v1".to_string())
+        .expect("explicit OpenRouter HTTP opt-out");
+    GeminiClient::new("test-key".to_string())
+        .expect("default Gemini client")
+        .with_insecure_base_url("http://localhost:8080/v1beta".to_string())
+        .expect("explicit Gemini HTTP opt-out");
+}
+
+fn assert_insecure_base_url_error<T>(result: Result<T, LlmError>) {
+    match result {
+        Err(LlmError::ProviderConfiguration(message)) => {
+            assert!(message.contains("Insecure provider base URL rejected"));
+        }
+        Err(other) => panic!("expected insecure base URL configuration error, got {other:?}"),
+        Ok(_) => panic!("expected insecure base URL configuration error"),
+    }
 }

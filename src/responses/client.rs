@@ -11,7 +11,7 @@ use crate::{
     CompletionTarget, Provider,
     core::{
         ChatRole, ConversationMessage, HttpClient, InspectorConfig, LlmError, StructuredRequest,
-        Tool, ToolCall, ToolCallingGuard, ToolRegistry,
+        Tool, ToolCall, ToolCallingGuard, ToolRegistry, http::validate_provider_base_url,
     },
     responses::{
         Format, FormatType, FunctionToolCall, FunctionToolCallOutput, JsonSchema, JsonSchemaType,
@@ -24,7 +24,7 @@ use schemars::schema_for;
 use tracing;
 
 // Re-export HttpClientConfig from core for backwards compatibility
-pub use crate::core::HttpClientConfig;
+pub use crate::core::{BaseUrlSecurity, HttpClientConfig};
 
 /// Configuration trait for providers that use the OpenAI-style responses API
 pub trait ResponsesProviderConfig {
@@ -33,6 +33,11 @@ pub trait ResponsesProviderConfig {
 
     /// Base URL for the API (e.g., `https://api.openai.com`)
     fn base_url(&self) -> &str;
+
+    /// Security policy for custom provider base URLs.
+    fn base_url_security(&self) -> BaseUrlSecurity {
+        BaseUrlSecurity::HttpsOnly
+    }
 
     /// API endpoint for responses (e.g., `/v1/responses`)
     fn endpoint(&self) -> &str;
@@ -69,6 +74,8 @@ pub struct ResponsesClient<P: ResponsesProviderConfig> {
 impl<P: ResponsesProviderConfig> ResponsesClient<P> {
     /// Create a new responses client with the given configuration
     pub fn new(config: P) -> Result<Self, LlmError> {
+        validate_provider_base_url(config.base_url(), config.base_url_security())?;
+
         let http_config = config.http_config();
         let user_agent = config.user_agent();
         let inspector_config = config.inspector_config().cloned();
@@ -640,6 +647,10 @@ mod tests {
 
         fn base_url(&self) -> &str {
             &self.base_url
+        }
+
+        fn base_url_security(&self) -> BaseUrlSecurity {
+            BaseUrlSecurity::AllowInsecureHttp
         }
 
         fn endpoint(&self) -> &str {

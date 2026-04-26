@@ -4,10 +4,12 @@
 
 use serde::{Serialize, de::DeserializeOwned};
 
+pub use crate::core::BaseUrlSecurity;
 use crate::{
     core::{
         FunctionCallData, HttpClient, HttpClientConfig, InspectorConfig, LlmError,
         ProviderResponse, StructuredRequest, ToolCall, ToolCallingGuard, ToolRegistry,
+        http::validate_provider_base_url,
     },
     responses::Format,
 };
@@ -64,6 +66,11 @@ pub trait CompletionProviderConfig {
     /// Get the base URL for the API
     fn base_url(&self) -> &str;
 
+    /// Security policy for custom provider base URLs.
+    fn base_url_security(&self) -> BaseUrlSecurity {
+        BaseUrlSecurity::HttpsOnly
+    }
+
     /// Get the authentication header as (name, value) tuple
     fn auth_header(&self) -> (String, String);
 
@@ -97,6 +104,8 @@ pub struct CompletionClient<P: CompletionProviderConfig> {
 impl<P: CompletionProviderConfig> CompletionClient<P> {
     /// Create a new completion client with the given configuration.
     pub fn new(config: P) -> Result<Self, LlmError> {
+        validate_provider_base_url(config.base_url(), config.base_url_security())?;
+
         let http_config = config.http_config();
         let user_agent = config.user_agent();
         let inspector_config = config.inspector_config().cloned();

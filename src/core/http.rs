@@ -12,6 +12,16 @@ use tracing::{debug, warn};
 use super::builder::InspectorConfig;
 use super::error::LlmError;
 
+/// Security policy for provider base URLs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BaseUrlSecurity {
+    /// Require custom provider base URLs to use HTTPS.
+    #[default]
+    HttpsOnly,
+    /// Allow HTTP base URLs for trusted local or proxy endpoints.
+    AllowInsecureHttp,
+}
+
 /// Configuration for HTTP client resilience
 #[derive(Debug, Clone)]
 pub struct HttpClientConfig {
@@ -32,6 +42,40 @@ impl Default for HttpClientConfig {
             max_retry_delay: Duration::from_secs(10),
         }
     }
+}
+
+pub(crate) fn validate_provider_base_url(
+    base_url: &str,
+    security: BaseUrlSecurity,
+) -> Result<(), LlmError> {
+    let url = reqwest::Url::parse(base_url).map_err(|e| {
+        LlmError::ProviderConfiguration(format!("Invalid provider base URL '{base_url}': {e}"))
+    })?;
+
+    match url.scheme() {
+        "https" => {}
+        "http" if security == BaseUrlSecurity::AllowInsecureHttp => {}
+        "http" => {
+            return Err(LlmError::ProviderConfiguration(
+                "Insecure provider base URL rejected: custom base URLs receive provider API keys. \
+                 Use HTTPS or call with_insecure_base_url for a trusted local/proxy endpoint."
+                    .to_string(),
+            ));
+        }
+        scheme => {
+            return Err(LlmError::ProviderConfiguration(format!(
+                "Invalid provider base URL scheme '{scheme}': expected https"
+            )));
+        }
+    }
+
+    if url.host_str().is_none() {
+        return Err(LlmError::ProviderConfiguration(
+            "Invalid provider base URL: expected an absolute URL with a host".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Shared HTTP client with retry logic and exponential backoff.
@@ -316,5 +360,40 @@ mod tests {
             .expect("second client should build");
 
         assert!(!Arc::ptr_eq(&first.client, &second.client));
+    }
+
+    #[test]
+    fn provider_base_url_validation_allows_https() {
+        validate_provider_base_url("https://api.openai.com/v1", BaseUrlSecurity::HttpsOnly)
+            .expect("https base URL should be accepted");
+    }
+
+    #[test]
+    fn provider_base_url_validation_rejects_invalid_url() {
+        assert!(validate_provider_base_url("not a url", BaseUrlSecurity::HttpsOnly).is_err());
+    }
+
+    #[test]
+    fn provider_base_url_validation_rejects_unsupported_scheme() {
+        assert!(
+            validate_provider_base_url("ftp://example.com/v1", BaseUrlSecurity::HttpsOnly).is_err()
+        );
+    }
+
+    #[test]
+    fn provider_base_url_validation_rejects_http_by_default() {
+        assert!(
+            validate_provider_base_url("http://localhost:8080/v1", BaseUrlSecurity::HttpsOnly)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_base_url_validation_allows_http_with_explicit_opt_out() {
+        validate_provider_base_url(
+            "http://localhost:8080/v1",
+            BaseUrlSecurity::AllowInsecureHttp,
+        )
+        .expect("explicit insecure opt-out should accept http");
     }
 }

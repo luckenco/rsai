@@ -262,7 +262,7 @@ fn client_for(server: &MockServer, config: Option<ToolCallingConfig>) -> OpenAiC
     let base_url = format!("{}/v1", server.uri());
     let client = OpenAiClient::new("test-key".to_string())
         .unwrap()
-        .with_base_url(base_url)
+        .with_insecure_base_url(base_url)
         .unwrap();
 
     if let Some(cfg) = config {

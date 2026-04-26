@@ -15,8 +15,8 @@ use crate::provider::constants::openrouter;
 use crate::responses::{HttpClientConfig, ResponsesClient, ResponsesProviderConfig};
 
 use crate::core::{
-    InspectorConfig, LlmBuilder, LlmError, LlmProvider, StructuredRequest, ToolCallingConfig,
-    ToolCallingGuard, ToolRegistry,
+    BaseUrlSecurity, InspectorConfig, LlmBuilder, LlmError, LlmProvider, StructuredRequest,
+    ToolCallingConfig, ToolCallingGuard, ToolRegistry,
 };
 use async_trait::async_trait;
 
@@ -24,6 +24,7 @@ use async_trait::async_trait;
 pub struct OpenRouterConfig {
     pub api_key: String,
     pub base_url: String,
+    pub base_url_security: BaseUrlSecurity,
     pub http_referer: Option<String>,
     pub x_title: Option<String>,
     pub http_config: HttpClientConfig,
@@ -38,6 +39,7 @@ impl OpenRouterConfig {
         Self {
             api_key,
             base_url: openrouter::API_BASE.to_string(),
+            base_url_security: BaseUrlSecurity::HttpsOnly,
             http_referer: None,
             x_title: None,
             tool_calling_config: Some(ToolCallingConfig::default()),
@@ -46,8 +48,29 @@ impl OpenRouterConfig {
         }
     }
 
+    /// Set a custom OpenRouter-compatible base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the OpenRouter API key in the `Authorization` header. This
+    /// method requires HTTPS; use [`Self::with_insecure_base_url`] only for trusted local or proxy
+    /// endpoints that intentionally use HTTP.
     pub fn with_base_url(mut self, base_url: String) -> Self {
         self.base_url = base_url;
+        self.base_url_security = BaseUrlSecurity::HttpsOnly;
+        self
+    }
+
+    /// Set a custom OpenRouter-compatible HTTP base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the OpenRouter API key in the `Authorization` header. Use this
+    /// only for trusted local or proxy endpoints because the API key may be sent over plaintext
+    /// HTTP.
+    pub fn with_insecure_base_url(mut self, base_url: String) -> Self {
+        self.base_url = base_url;
+        self.base_url_security = BaseUrlSecurity::AllowInsecureHttp;
         self
     }
 
@@ -88,6 +111,10 @@ impl OpenRouterConfig {
 impl ResponsesProviderConfig for OpenRouterConfig {
     fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    fn base_url_security(&self) -> BaseUrlSecurity {
+        self.base_url_security
     }
 
     fn endpoint(&self) -> &str {
@@ -147,6 +174,13 @@ impl OpenRouterClient {
         })
     }
 
+    /// Set a custom OpenRouter-compatible base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the OpenRouter API key in the `Authorization` header. This
+    /// method requires HTTPS; use [`Self::with_insecure_base_url`] only for trusted local or proxy
+    /// endpoints that intentionally use HTTP.
     pub fn with_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
         // Create a new config with the updated base_url using the current API key
         let current_api_key = &self.responses_client.config.api_key;
@@ -158,6 +192,35 @@ impl OpenRouterClient {
         let new_config = OpenRouterConfig {
             api_key: current_api_key.clone(),
             base_url,
+            base_url_security: BaseUrlSecurity::HttpsOnly,
+            http_referer,
+            x_title,
+            tool_calling_config: self.responses_client.config.tool_calling_config.clone(),
+            http_config,
+            inspector_config,
+        };
+        self.responses_client = ResponsesClient::new(new_config)?;
+        Ok(self)
+    }
+
+    /// Set a custom OpenRouter-compatible HTTP base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the OpenRouter API key in the `Authorization` header. Use this
+    /// only for trusted local or proxy endpoints because the API key may be sent over plaintext
+    /// HTTP.
+    pub fn with_insecure_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
+        let current_api_key = &self.responses_client.config.api_key;
+        let http_referer = self.responses_client.config.http_referer.clone();
+        let x_title = self.responses_client.config.x_title.clone();
+        let http_config = self.responses_client.config.http_config.clone();
+        let inspector_config = self.responses_client.config.inspector_config.clone();
+
+        let new_config = OpenRouterConfig {
+            api_key: current_api_key.clone(),
+            base_url,
+            base_url_security: BaseUrlSecurity::AllowInsecureHttp,
             http_referer,
             x_title,
             tool_calling_config: self.responses_client.config.tool_calling_config.clone(),
@@ -189,6 +252,7 @@ impl OpenRouterClient {
         let new_config = OpenRouterConfig {
             api_key: current_api_key.clone(),
             base_url: base_url.clone(),
+            base_url_security: self.responses_client.config.base_url_security,
             http_referer,
             x_title,
             tool_calling_config: Some(config),
@@ -204,6 +268,7 @@ impl OpenRouterClient {
         let new_config = OpenRouterConfig {
             api_key: current_config.api_key.clone(),
             base_url: current_config.base_url.clone(),
+            base_url_security: current_config.base_url_security,
             http_referer: current_config.http_referer.clone(),
             x_title: current_config.x_title.clone(),
             tool_calling_config: current_config.tool_calling_config.clone(),

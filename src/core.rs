@@ -8,7 +8,7 @@ mod types;
 pub use builder::{ApiKey, Inspector, InspectorConfig, LlmBuilder, llm};
 
 pub use error::LlmError;
-pub use http::{HttpClient, HttpClientConfig};
+pub use http::{BaseUrlSecurity, HttpClient, HttpClientConfig};
 pub use tool_guard::{ToolCallingConfig, ToolCallingGuard};
 pub use traits::{CompletionTarget, LlmProvider, ToolFunction};
 
