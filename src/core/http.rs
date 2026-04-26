@@ -1,6 +1,10 @@
 //! Shared HTTP client with retry logic for all providers.
 
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, warn};
@@ -32,9 +36,52 @@ impl Default for HttpClientConfig {
 
 /// Shared HTTP client with retry logic and exponential backoff.
 pub struct HttpClient {
-    client: reqwest::Client,
+    client: Arc<reqwest::Client>,
     config: HttpClientConfig,
     inspector_config: Option<InspectorConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ClientPoolKey {
+    timeout: Duration,
+    user_agent: String,
+}
+
+static CLIENT_POOL: OnceLock<Mutex<HashMap<ClientPoolKey, Arc<reqwest::Client>>>> = OnceLock::new();
+
+fn client_pool() -> &'static Mutex<HashMap<ClientPoolKey, Arc<reqwest::Client>>> {
+    CLIENT_POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pooled_reqwest_client(
+    timeout: Duration,
+    user_agent: String,
+) -> Result<Arc<reqwest::Client>, LlmError> {
+    let key = ClientPoolKey {
+        timeout,
+        user_agent,
+    };
+
+    let mut clients = client_pool().lock().map_err(|_| {
+        LlmError::ProviderConfiguration("Failed to access HTTP client pool".to_string())
+    })?;
+
+    if let Some(client) = clients.get(&key) {
+        return Ok(Arc::clone(client));
+    }
+
+    let client = Arc::new(
+        reqwest::Client::builder()
+            .timeout(key.timeout)
+            .user_agent(key.user_agent.as_str())
+            .build()
+            .map_err(|e| {
+                LlmError::ProviderConfiguration(format!("Failed to build reqwest client: {e}"))
+            })?,
+    );
+
+    clients.insert(key, Arc::clone(&client));
+    Ok(client)
 }
 
 impl HttpClient {
@@ -44,16 +91,11 @@ impl HttpClient {
         user_agent: Option<&str>,
         inspector_config: Option<InspectorConfig>,
     ) -> Result<Self, LlmError> {
-        let default_ua = format!("rsai/{}", env!("CARGO_PKG_VERSION"));
-        let ua = user_agent.unwrap_or(&default_ua);
-
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .user_agent(ua)
-            .build()
-            .map_err(|e| {
-                LlmError::ProviderConfiguration(format!("Failed to build reqwest client: {e}"))
-            })?;
+        let user_agent = user_agent.map_or_else(
+            || format!("rsai/{}", env!("CARGO_PKG_VERSION")),
+            str::to_owned,
+        );
+        let client = pooled_reqwest_client(config.timeout, user_agent)?;
 
         Ok(Self {
             client,
@@ -220,5 +262,59 @@ impl HttpClient {
             status_code: None,
             source: None,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_timeout(timeout: Duration) -> HttpClientConfig {
+        HttpClientConfig {
+            timeout,
+            ..HttpClientConfig::default()
+        }
+    }
+
+    #[test]
+    fn clients_with_same_timeout_and_user_agent_share_pool_entry() {
+        let config = config_with_timeout(Duration::from_secs(7));
+
+        let first = HttpClient::new(config.clone(), Some("rsai-test-shared"), None)
+            .expect("first client should build");
+        let second = HttpClient::new(config, Some("rsai-test-shared"), None)
+            .expect("second client should build");
+
+        assert!(Arc::ptr_eq(&first.client, &second.client));
+    }
+
+    #[test]
+    fn clients_with_different_timeouts_use_distinct_pool_entries() {
+        let first = HttpClient::new(
+            config_with_timeout(Duration::from_secs(11)),
+            Some("rsai-test-timeout"),
+            None,
+        )
+        .expect("first client should build");
+        let second = HttpClient::new(
+            config_with_timeout(Duration::from_secs(12)),
+            Some("rsai-test-timeout"),
+            None,
+        )
+        .expect("second client should build");
+
+        assert!(!Arc::ptr_eq(&first.client, &second.client));
+    }
+
+    #[test]
+    fn clients_with_different_user_agents_use_distinct_pool_entries() {
+        let config = config_with_timeout(Duration::from_secs(13));
+
+        let first = HttpClient::new(config.clone(), Some("rsai-test-agent-a"), None)
+            .expect("first client should build");
+        let second = HttpClient::new(config, Some("rsai-test-agent-b"), None)
+            .expect("second client should build");
+
+        assert!(!Arc::ptr_eq(&first.client, &second.client));
     }
 }

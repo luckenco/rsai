@@ -24,20 +24,19 @@ schemars = "1.0.4"
 [dependencies]
 rsai-macros = { path = "macros", version = "0.2.0" }
 async-trait = "0.1.87"
-bytes = "1.10.1"
 futures = "0.3.31"
 rand = "0.9.0"
-reqwest = { version = "0.12.12", features = ["json", "stream"] }
+reqwest = { version = "0.12.12", features = ["json"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2.0.12"
-tokio = { version = "1.43.0", features = ["full"] }
-tokio-stream = "0.1.17"
+tokio = { version = "1.43.0", features = ["time"] }
 tracing = "0.1.41"
 
 [dev-dependencies]
 dotenv = "0.15.0"
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "time"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 wiremock = "0.6.5"
 
