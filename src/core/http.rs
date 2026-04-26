@@ -91,6 +91,8 @@ struct ClientPoolKey {
     user_agent: String,
 }
 
+const MAX_CLIENT_POOL_ENTRIES: usize = 32;
+
 static CLIENT_POOL: OnceLock<Mutex<HashMap<ClientPoolKey, Arc<reqwest::Client>>>> = OnceLock::new();
 
 fn client_pool() -> &'static Mutex<HashMap<ClientPoolKey, Arc<reqwest::Client>>> {
@@ -114,18 +116,28 @@ fn pooled_reqwest_client(
         return Ok(Arc::clone(client));
     }
 
-    let client = Arc::new(
+    let client = build_reqwest_client(key.timeout, &key.user_agent)?;
+
+    if clients.len() < MAX_CLIENT_POOL_ENTRIES {
+        clients.insert(key, Arc::clone(&client));
+    }
+
+    Ok(client)
+}
+
+fn build_reqwest_client(
+    timeout: Duration,
+    user_agent: &str,
+) -> Result<Arc<reqwest::Client>, LlmError> {
+    Ok(Arc::new(
         reqwest::Client::builder()
-            .timeout(key.timeout)
-            .user_agent(key.user_agent.as_str())
+            .timeout(timeout)
+            .user_agent(user_agent)
             .build()
             .map_err(|e| {
                 LlmError::ProviderConfiguration(format!("Failed to build reqwest client: {e}"))
             })?,
-    );
-
-    clients.insert(key, Arc::clone(&client));
-    Ok(client)
+    ))
 }
 
 impl HttpClient {
@@ -313,6 +325,20 @@ impl HttpClient {
 mod tests {
     use super::*;
 
+    static CLIENT_POOL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_client_pool_for_test() -> std::sync::MutexGuard<'static, ()> {
+        CLIENT_POOL_TEST_LOCK.lock().expect("client pool test lock")
+    }
+
+    fn clear_client_pool() {
+        client_pool().lock().expect("client pool lock").clear();
+    }
+
+    fn client_pool_len() -> usize {
+        client_pool().lock().expect("client pool lock").len()
+    }
+
     fn config_with_timeout(timeout: Duration) -> HttpClientConfig {
         HttpClientConfig {
             timeout,
@@ -322,6 +348,8 @@ mod tests {
 
     #[test]
     fn clients_with_same_timeout_and_user_agent_share_pool_entry() {
+        let _guard = lock_client_pool_for_test();
+        clear_client_pool();
         let config = config_with_timeout(Duration::from_secs(7));
 
         let first = HttpClient::new(config.clone(), Some("rsai-test-shared"), None)
@@ -334,6 +362,8 @@ mod tests {
 
     #[test]
     fn clients_with_different_timeouts_use_distinct_pool_entries() {
+        let _guard = lock_client_pool_for_test();
+        clear_client_pool();
         let first = HttpClient::new(
             config_with_timeout(Duration::from_secs(11)),
             Some("rsai-test-timeout"),
@@ -352,6 +382,8 @@ mod tests {
 
     #[test]
     fn clients_with_different_user_agents_use_distinct_pool_entries() {
+        let _guard = lock_client_pool_for_test();
+        clear_client_pool();
         let config = config_with_timeout(Duration::from_secs(13));
 
         let first = HttpClient::new(config.clone(), Some("rsai-test-agent-a"), None)
@@ -360,6 +392,42 @@ mod tests {
             .expect("second client should build");
 
         assert!(!Arc::ptr_eq(&first.client, &second.client));
+    }
+
+    #[test]
+    fn client_pool_does_not_grow_past_cap() {
+        let _guard = lock_client_pool_for_test();
+        clear_client_pool();
+
+        for index in 0..MAX_CLIENT_POOL_ENTRIES {
+            HttpClient::new(
+                config_with_timeout(Duration::from_secs(index as u64 + 1)),
+                Some("rsai-test-capped"),
+                None,
+            )
+            .expect("pooled client should build");
+        }
+
+        assert_eq!(client_pool_len(), MAX_CLIENT_POOL_ENTRIES);
+
+        let overflow = HttpClient::new(
+            config_with_timeout(Duration::from_secs(10_000)),
+            Some("rsai-test-capped-overflow"),
+            None,
+        )
+        .expect("overflow client should build");
+
+        assert_eq!(client_pool_len(), MAX_CLIENT_POOL_ENTRIES);
+
+        let second_overflow = HttpClient::new(
+            config_with_timeout(Duration::from_secs(10_000)),
+            Some("rsai-test-capped-overflow"),
+            None,
+        )
+        .expect("second overflow client should build");
+
+        assert!(!Arc::ptr_eq(&overflow.client, &second_overflow.client));
+        assert_eq!(client_pool_len(), MAX_CLIENT_POOL_ENTRIES);
     }
 
     #[test]
