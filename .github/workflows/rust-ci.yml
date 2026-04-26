@@ -28,7 +28,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy lints
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --workspace --all-targets --all-features
 
   test:
     name: Test

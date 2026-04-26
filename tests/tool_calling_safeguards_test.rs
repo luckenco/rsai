@@ -106,12 +106,15 @@ async fn test_openai_config_tool_calling() {
     // Should have default values
     assert_eq!(guard.max_iterations, 50);
     assert_eq!(guard.timeout, Duration::from_secs(300));
+    assert_eq!(guard.max_tool_calls_per_turn, 8);
+    assert_eq!(guard.max_concurrent_tool_calls, 4);
+    assert_eq!(guard.tool_timeout, Duration::from_secs(30));
 
     // Test custom config
-    let custom_config = ToolCallingConfig {
-        max_iterations: 75,
-        timeout: Duration::from_secs(600),
-    };
+    let custom_config = ToolCallingConfig::new(75, Duration::from_secs(600))
+        .with_max_tool_calls_per_turn(6)
+        .with_max_concurrent_tool_calls(2)
+        .with_tool_timeout(Duration::from_secs(15));
 
     let config_with_custom =
         OpenAiConfig::new("test-key".to_string()).with_tool_calling_config(custom_config);
@@ -119,6 +122,9 @@ async fn test_openai_config_tool_calling() {
 
     assert_eq!(custom_guard.max_iterations, 75);
     assert_eq!(custom_guard.timeout, Duration::from_secs(600));
+    assert_eq!(custom_guard.max_tool_calls_per_turn, 6);
+    assert_eq!(custom_guard.max_concurrent_tool_calls, 2);
+    assert_eq!(custom_guard.tool_timeout, Duration::from_secs(15));
 }
 
 #[tokio::test]
@@ -129,12 +135,15 @@ async fn test_openrouter_config_tool_calling() {
     // Should have default values
     assert_eq!(guard.max_iterations, 50);
     assert_eq!(guard.timeout, Duration::from_secs(300));
+    assert_eq!(guard.max_tool_calls_per_turn, 8);
+    assert_eq!(guard.max_concurrent_tool_calls, 4);
+    assert_eq!(guard.tool_timeout, Duration::from_secs(30));
 
     // Test custom config
-    let custom_config = ToolCallingConfig {
-        max_iterations: 100,
-        timeout: Duration::from_secs(900),
-    };
+    let custom_config = ToolCallingConfig::new(100, Duration::from_secs(900))
+        .with_max_tool_calls_per_turn(7)
+        .with_max_concurrent_tool_calls(3)
+        .with_tool_timeout(Duration::from_secs(20));
 
     let config_with_custom =
         OpenRouterConfig::new("test-key".to_string()).with_tool_calling_config(custom_config);
@@ -142,4 +151,7 @@ async fn test_openrouter_config_tool_calling() {
 
     assert_eq!(custom_guard.max_iterations, 100);
     assert_eq!(custom_guard.timeout, Duration::from_secs(900));
+    assert_eq!(custom_guard.max_tool_calls_per_turn, 7);
+    assert_eq!(custom_guard.max_concurrent_tool_calls, 3);
+    assert_eq!(custom_guard.tool_timeout, Duration::from_secs(20));
 }

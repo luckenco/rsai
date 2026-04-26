@@ -21,6 +21,7 @@ use crate::{
 
 use super::{
     error::LlmError,
+    tool_guard::ToolCallingConfig,
     traits::LlmProvider,
     types::{
         ConversationMessage, GenerationConfig, Message, StructuredRequest, ToolChoice, ToolConfig,
@@ -56,6 +57,7 @@ struct BuilderFields<Ctx = ()> {
     // Tool configuration
     tool_choice: Option<ToolChoice>,
     parallel_tool_calls: Option<bool>,
+    tool_calling_config: Option<ToolCallingConfig>,
     tool_registry: Option<ToolRegistry<Ctx>>,
 
     // Generation parameters
@@ -76,6 +78,7 @@ impl BuilderFields<()> {
             messages: None,
             tool_choice: None,
             parallel_tool_calls: None,
+            tool_calling_config: None,
             tool_registry: None,
             max_tokens: None,
             temperature: None,
@@ -100,6 +103,7 @@ impl<Ctx> BuilderFields<Ctx> {
             messages: self.messages,
             tool_choice: self.tool_choice,
             parallel_tool_calls: self.parallel_tool_calls,
+            tool_calling_config: self.tool_calling_config,
             tool_registry,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
@@ -164,6 +168,10 @@ impl<State, Ctx> LlmBuilder<State, Ctx> {
 
     pub(crate) fn get_inspector_config(&self) -> Option<&InspectorConfig> {
         self.fields.inspector_config.as_ref()
+    }
+
+    pub(crate) fn get_tool_calling_config(&self) -> Option<&ToolCallingConfig> {
+        self.fields.tool_calling_config.as_ref()
     }
 }
 
@@ -448,7 +456,7 @@ impl<State: private::Completable, Ctx: Send + Sync + 'static> LlmBuilder<State, 
 
 impl LlmBuilder<private::MessagesSet, ()> {
     /// Set the tools for the LLM request with automatic execution support.
-    /// This transitions to the ToolsSet state where tool_choice and parallel_tool_calls can be configured.
+    /// This transitions to the ToolsSet state where tool behavior can be configured.
     ///
     /// By default parallel tool calling is enabled. This can be changed by calling `parallel_tool_calls` with `false`.
     pub fn tools<NewCtx: Send + Sync + 'static>(
@@ -474,6 +482,12 @@ impl<Ctx: Send + Sync + 'static> LlmBuilder<private::ToolsSet, Ctx> {
     /// When true, the model can call multiple tools simultaneously.
     pub fn parallel_tool_calls(mut self, enabled: bool) -> Self {
         self.fields.parallel_tool_calls = Some(enabled);
+        self
+    }
+
+    /// Set local safety limits for automatic tool execution.
+    pub fn tool_calling_config(mut self, config: ToolCallingConfig) -> Self {
+        self.fields.tool_calling_config = Some(config);
         self
     }
 }
@@ -510,6 +524,7 @@ pub mod llm {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn test_inspect_request_is_chainable() {
@@ -582,6 +597,45 @@ mod tests {
         let config = builder.fields.inspector_config.as_ref().unwrap();
         assert!(config.request_inspector.is_some());
         assert!(config.response_inspector.is_some());
+    }
+
+    #[test]
+    fn test_tool_calling_config_is_chainable_after_tools() {
+        let toolset = super::super::types::ToolSet {
+            registry: ToolRegistry::new(),
+        };
+        let config = ToolCallingConfig::new(2, Duration::from_secs(10))
+            .with_max_tool_calls_per_turn(3)
+            .with_max_concurrent_tool_calls(2)
+            .with_tool_timeout(Duration::from_secs(1));
+
+        let builder = llm::with(Provider::OpenAI)
+            .api_key(ApiKey::Custom("test".into()))
+            .unwrap()
+            .model("gpt-4o-mini")
+            .messages(vec![Message {
+                role: super::super::types::ChatRole::User,
+                content: "test".to_string(),
+            }])
+            .tools(toolset)
+            .tool_calling_config(config.clone());
+
+        let stored = builder
+            .fields
+            .tool_calling_config
+            .as_ref()
+            .expect("tool calling config");
+        assert_eq!(stored.max_iterations, config.max_iterations);
+        assert_eq!(stored.timeout, config.timeout);
+        assert_eq!(
+            stored.max_tool_calls_per_turn,
+            config.max_tool_calls_per_turn
+        );
+        assert_eq!(
+            stored.max_concurrent_tool_calls,
+            config.max_concurrent_tool_calls
+        );
+        assert_eq!(stored.tool_timeout, config.tool_timeout);
     }
 
     #[test]

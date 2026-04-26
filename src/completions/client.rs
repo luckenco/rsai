@@ -196,6 +196,7 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
 
             if let Some(calls) = function_calls.filter(|c| !c.is_empty()) {
                 tracing::info!(count = calls.len(), "Model requested tool execution");
+                guard.check_tool_calls_for_turn(calls.len())?;
 
                 for call in &calls {
                     // Add function call to conversation
@@ -212,7 +213,9 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     };
-                    let result = tool_registry.execute(&tool_call).await?;
+                    let result = self
+                        .execute_tool_with_timeout(tool_registry, &tool_call, guard.tool_timeout)
+                        .await?;
 
                     // Add result to conversation
                     conversation.push(ConversationItem::FunctionResult {
@@ -229,6 +232,24 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
                 tracing::debug!("No more tool calls, returning final response");
                 return builder.parse_response(api_response);
             }
+        }
+    }
+
+    async fn execute_tool_with_timeout<Ctx>(
+        &self,
+        tool_registry: &ToolRegistry<Ctx>,
+        tool_call: &ToolCall,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, LlmError>
+    where
+        Ctx: Send + Sync + 'static,
+    {
+        match tokio::time::timeout(timeout, tool_registry.execute(tool_call)).await {
+            Ok(result) => result,
+            Err(_) => Err(LlmError::ToolExecutionTimeout {
+                tool_name: tool_call.name.clone(),
+                timeout,
+            }),
         }
     }
 }

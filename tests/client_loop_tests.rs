@@ -1,9 +1,15 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use rsai::{
-    ChatRole, CompletionTarget, ConversationMessage, LlmError, LlmProvider, Message, OpenAiClient,
-    StructuredRequest, ToolCallingConfig, ToolChoice, ToolConfig, ToolSet, completion_schema, tool,
-    toolset,
+    BoxFuture, ChatRole, CompletionTarget, ConversationMessage, LlmError, LlmProvider, Message,
+    OpenAiClient, StructuredRequest, Tool, ToolCallingConfig, ToolChoice, ToolConfig, ToolFunction,
+    ToolRegistry, ToolSet, completion_schema, tool, toolset,
 };
 use serde_json::{Value, json};
 use wiremock::{
@@ -20,6 +26,45 @@ struct SumResponse {
 #[derive(Debug, serde::Serialize)]
 struct MultiplyResponse {
     product: i64,
+}
+
+struct TrackedTool {
+    executions: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    delay: Duration,
+}
+
+impl ToolFunction for TrackedTool {
+    fn schema(&self) -> Tool {
+        Tool {
+            name: "tracked_tool".to_string(),
+            description: Some("Track execution limits".to_string()),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "integer" }
+                },
+                "required": ["value"]
+            }),
+            strict: Some(true),
+        }
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _ctx: &'a (),
+        params: Value,
+    ) -> BoxFuture<'a, Result<Value, LlmError>> {
+        Box::pin(async move {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(json!({ "ok": true, "value": params["value"].clone() }))
+        })
+    }
 }
 
 #[tool]
@@ -186,6 +231,130 @@ async fn parallel_tool_calls_submit_all_results_together() {
 }
 
 #[tokio::test]
+async fn guard_rejects_too_many_tool_calls_before_execution() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(tool_call_response(vec![
+            function_call("call_one", "tracked_tool", json!({ "value": 1 })),
+            function_call("call_two", "tracked_tool", json!({ "value": 2 })),
+        ]))
+        .mount(&server)
+        .await;
+
+    let (registry, executions, _) = tracked_tool_registry(Duration::ZERO);
+    let tool_config = tool_config_for_registry(&registry, Some(true));
+    let request = build_request("call twice", tool_config);
+
+    let guard_config =
+        ToolCallingConfig::new(3, Duration::from_secs(5)).with_max_tool_calls_per_turn(1);
+    let client = client_for(&server, Some(guard_config));
+    let err = client
+        .generate_completion::<SumResponse, ()>(
+            request,
+            <SumResponse as CompletionTarget>::format().expect("format"),
+            Some(&registry),
+        )
+        .await
+        .expect_err("tool call limit should trip");
+
+    match err {
+        LlmError::ToolCallLimit { requested, limit } => {
+            assert_eq!(requested, 2);
+            assert_eq!(limit, 1);
+        }
+        other => panic!("expected ToolCallLimit, got {other:?}"),
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn parallel_tool_calls_respect_concurrency_limit() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(BodyNotContains("function_call_output"))
+        .respond_with(tool_call_response(vec![
+            function_call("call_one", "tracked_tool", json!({ "value": 1 })),
+            function_call("call_two", "tracked_tool", json!({ "value": 2 })),
+            function_call("call_three", "tracked_tool", json!({ "value": 3 })),
+            function_call("call_four", "tracked_tool", json!({ "value": 4 })),
+        ]))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(BodyContains("function_call_output"))
+        .respond_with(final_response(json!({ "sum": 10 })))
+        .mount(&server)
+        .await;
+
+    let (registry, executions, max_active) = tracked_tool_registry(Duration::from_millis(50));
+    let tool_config = tool_config_for_registry(&registry, Some(true));
+    let request = build_request("call four tools", tool_config);
+
+    let guard_config = ToolCallingConfig::new(3, Duration::from_secs(5))
+        .with_max_concurrent_tool_calls(2)
+        .with_tool_timeout(Duration::from_secs(1));
+    let client = client_for(&server, Some(guard_config));
+    let response = client
+        .generate_completion::<SumResponse, ()>(
+            request,
+            <SumResponse as CompletionTarget>::format().expect("format"),
+            Some(&registry),
+        )
+        .await
+        .expect("structured response");
+
+    assert_eq!(response.content.sum, 10);
+    assert_eq!(executions.load(Ordering::SeqCst), 4);
+    assert_eq!(max_active.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn tool_execution_timeout_triggers_error() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(tool_call_response(vec![function_call(
+            "call_slow",
+            "tracked_tool",
+            json!({ "value": 1 }),
+        )]))
+        .mount(&server)
+        .await;
+
+    let (registry, executions, _) = tracked_tool_registry(Duration::from_millis(200));
+    let tool_config = tool_config_for_registry(&registry, Some(false));
+    let request = build_request("call slow tool", tool_config);
+
+    let guard_config = ToolCallingConfig::new(3, Duration::from_secs(5))
+        .with_tool_timeout(Duration::from_millis(50));
+    let client = client_for(&server, Some(guard_config.clone()));
+    let err = client
+        .generate_completion::<SumResponse, ()>(
+            request,
+            <SumResponse as CompletionTarget>::format().expect("format"),
+            Some(&registry),
+        )
+        .await
+        .expect_err("tool timeout should trip");
+
+    match err {
+        LlmError::ToolExecutionTimeout { tool_name, timeout } => {
+            assert_eq!(tool_name, "tracked_tool");
+            assert_eq!(timeout, guard_config.tool_timeout);
+        }
+        other => panic!("expected ToolExecutionTimeout, got {other:?}"),
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn guard_stops_iteration_after_max_limit() {
     let server = MockServer::start().await;
 
@@ -278,6 +447,32 @@ fn tool_config_for(toolset: &ToolSet, parallel: Option<bool>) -> ToolConfig {
         tool_choice: Some(ToolChoice::Auto),
         parallel_tool_calls: parallel,
     }
+}
+
+fn tool_config_for_registry(registry: &ToolRegistry, parallel: Option<bool>) -> ToolConfig {
+    ToolConfig {
+        tools: Some(registry.get_schemas().expect("schemas").into_boxed_slice()),
+        tool_choice: Some(ToolChoice::Auto),
+        parallel_tool_calls: parallel,
+    }
+}
+
+fn tracked_tool_registry(delay: Duration) -> (ToolRegistry, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let registry = ToolRegistry::new();
+
+    registry
+        .register(Arc::new(TrackedTool {
+            executions: executions.clone(),
+            active,
+            max_active: max_active.clone(),
+            delay,
+        }))
+        .expect("tracked tool registration");
+
+    (registry, executions, max_active)
 }
 
 fn sum_toolset() -> ToolSet {

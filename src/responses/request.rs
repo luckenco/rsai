@@ -18,10 +18,6 @@ pub struct Request {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
 
-    /// Maximum number of total calls to built-in tools
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tool_calls: Option<u32>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
 

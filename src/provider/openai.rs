@@ -252,6 +252,10 @@ pub fn create_openai_client_from_builder<State, Ctx>(
         config = config.with_http_config(http_config.clone());
     }
 
+    if let Some(tool_calling_config) = builder.get_tool_calling_config() {
+        config = config.with_tool_calling_config(tool_calling_config.clone());
+    }
+
     if let Some(inspector_config) = builder.get_inspector_config() {
         config = config.with_inspector_config(inspector_config.clone());
     }

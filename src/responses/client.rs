@@ -20,6 +20,7 @@ use crate::{
         response::{MessageContent, OutputContent, Response},
     },
 };
+use futures::{StreamExt, TryStreamExt, stream};
 use schemars::schema_for;
 use tracing;
 
@@ -186,11 +187,14 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
                 "Model requested tool execution"
             );
 
+            guard.check_tool_calls_for_turn(function_calls.len())?;
+
             self.process_function_calls(
                 &function_calls,
                 &mut responses_input,
                 tool_registry,
                 is_parallel,
+                guard,
             )
             .await?;
         }
@@ -228,16 +232,27 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         responses_input: &mut Vec<InputItem>,
         tool_registry: &ToolRegistry<Ctx>,
         is_parallel: bool,
+        guard: &ToolCallingGuard,
     ) -> Result<(), LlmError>
     where
         Ctx: Send + Sync + 'static,
     {
         if is_parallel && function_calls.len() > 1 {
-            self.process_parallel_function_calls(function_calls, responses_input, tool_registry)
-                .await
+            self.process_parallel_function_calls(
+                function_calls,
+                responses_input,
+                tool_registry,
+                guard,
+            )
+            .await
         } else {
-            self.process_sequential_function_calls(function_calls, responses_input, tool_registry)
-                .await
+            self.process_sequential_function_calls(
+                function_calls,
+                responses_input,
+                tool_registry,
+                guard,
+            )
+            .await
         }
     }
 
@@ -249,6 +264,7 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         function_calls: &[&FunctionToolCall],
         responses_input: &mut Vec<InputItem>,
         tool_registry: &ToolRegistry<Ctx>,
+        guard: &ToolCallingGuard,
     ) -> Result<(), LlmError>
     where
         Ctx: Send + Sync + 'static,
@@ -267,12 +283,17 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
             });
         }
 
-        // Execute all tools concurrently
-        let futures: Vec<_> = tool_calls
-            .iter()
-            .map(|tc| tool_registry.execute(tc))
-            .collect();
-        let results = futures::future::try_join_all(futures).await?;
+        // Execute tools with bounded concurrency, preserving result order.
+        let tool_timeout = guard.tool_timeout;
+        let max_concurrent_tool_calls = guard.max_concurrent_tool_calls();
+        let results: Vec<serde_json::Value> = stream::iter(tool_calls.iter().cloned())
+            .map(|tool_call| async move {
+                self.execute_tool_with_timeout(tool_registry, &tool_call, tool_timeout)
+                    .await
+            })
+            .buffered(max_concurrent_tool_calls)
+            .try_collect()
+            .await?;
 
         // Add all results in order
         for (tool_call, result) in tool_calls.iter().zip(results) {
@@ -292,6 +313,7 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         function_calls: &[&FunctionToolCall],
         responses_input: &mut Vec<InputItem>,
         tool_registry: &ToolRegistry<Ctx>,
+        guard: &ToolCallingGuard,
     ) -> Result<(), LlmError>
     where
         Ctx: Send + Sync + 'static,
@@ -307,7 +329,9 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
                 arguments,
             };
 
-            let result = tool_registry.execute(&tool_call).await?;
+            let result = self
+                .execute_tool_with_timeout(tool_registry, &tool_call, guard.tool_timeout)
+                .await?;
 
             responses_input.push(InputItem::FunctionCallOutput(FunctionToolCallOutput {
                 call_id: function_call.call_id.clone(),
@@ -317,6 +341,24 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         }
 
         Ok(())
+    }
+
+    async fn execute_tool_with_timeout<Ctx>(
+        &self,
+        tool_registry: &ToolRegistry<Ctx>,
+        tool_call: &ToolCall,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, LlmError>
+    where
+        Ctx: Send + Sync + 'static,
+    {
+        match tokio::time::timeout(timeout, tool_registry.execute(tool_call)).await {
+            Ok(result) => result,
+            Err(_) => Err(LlmError::ToolExecutionTimeout {
+                tool_name: tool_call.name.clone(),
+                timeout,
+            }),
+        }
     }
 
     /// Shared generate_completion for responses-API providers (OpenAI, OpenRouter).
@@ -386,7 +428,6 @@ pub(crate) fn build_request_payload_with_format(
         tool_choice: None,
         instructions: None,
         max_output_tokens: None,
-        max_tool_calls: None,
         store: None,
         top_logprobs: None,
         top_p: None,
@@ -689,7 +730,6 @@ mod tests {
             tool_choice: None,
             instructions: None,
             max_output_tokens: None,
-            max_tool_calls: None,
             store: None,
             top_logprobs: None,
             top_p: None,

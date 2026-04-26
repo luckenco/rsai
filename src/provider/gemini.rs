@@ -251,7 +251,7 @@ impl GeminiConfig {
 
     pub fn get_tool_calling_guard(&self) -> ToolCallingGuard {
         if let Some(ref config) = self.tool_calling_config {
-            ToolCallingGuard::with_limits(config.max_iterations, config.timeout)
+            ToolCallingGuard::from_config(config)
         } else {
             ToolCallingGuard::new()
         }
@@ -799,6 +799,10 @@ pub fn create_gemini_client_from_builder<State, Ctx>(
 
     if let Some(http_config) = builder.get_http_config() {
         client = client.with_http_config(http_config.clone())?;
+    }
+
+    if let Some(tool_calling_config) = builder.get_tool_calling_config() {
+        client = client.with_tool_calling_config(tool_calling_config.clone())?;
     }
 
     if let Some(inspector_config) = builder.get_inspector_config() {

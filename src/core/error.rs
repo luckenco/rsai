@@ -53,8 +53,17 @@ pub enum LlmError {
     #[error("Tool call iteration limit exceeded: {limit} iterations")]
     ToolCallIterationLimit { limit: u32 },
 
+    #[error("Tool call limit exceeded: requested {requested} calls, limit is {limit}")]
+    ToolCallLimit { requested: usize, limit: usize },
+
     #[error("Tool call processing timeout exceeded: {timeout:?}")]
     ToolCallTimeout { timeout: std::time::Duration },
+
+    #[error("Tool execution timeout exceeded for {tool_name}: {timeout:?}")]
+    ToolExecutionTimeout {
+        tool_name: String,
+        timeout: std::time::Duration,
+    },
 
     #[error("Tool registration failed for {tool_name}: {message}")]
     ToolRegistration { tool_name: String, message: String },
