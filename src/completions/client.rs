@@ -2,6 +2,7 @@
 //!
 //! This module provides reusable infrastructure for completion-style APIs.
 
+use futures::{StreamExt, TryStreamExt, stream};
 use serde::{Serialize, de::DeserializeOwned};
 
 pub use crate::core::BaseUrlSecurity;
@@ -198,35 +199,42 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
                 tracing::info!(count = calls.len(), "Model requested tool execution");
                 guard.check_tool_calls_for_turn(calls.len())?;
 
+                let mut tool_calls = Vec::with_capacity(calls.len());
                 for call in &calls {
-                    // Add function call to conversation
                     conversation.push(ConversationItem::FunctionCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     });
 
-                    // Execute the tool
-                    let tool_call = ToolCall {
+                    tool_calls.push(ToolCall {
                         id: call.id.clone(),
                         call_id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
-                    };
-                    let result = self
-                        .execute_tool_with_timeout(tool_registry, &tool_call, guard.tool_timeout)
-                        .await?;
-
-                    // Add result to conversation
-                    conversation.push(ConversationItem::FunctionResult {
-                        call_id: call.id.clone(),
-                        result: result.clone(),
                     });
+                }
 
-                    // In sequential mode process one call per model turn.
-                    if !is_parallel {
-                        break;
-                    }
+                let max_concurrent_tool_calls = if is_parallel {
+                    guard.max_concurrent_tool_calls()
+                } else {
+                    1
+                };
+                let tool_timeout = guard.tool_timeout;
+                let results: Vec<serde_json::Value> = stream::iter(tool_calls.iter().cloned())
+                    .map(|tool_call| async move {
+                        self.execute_tool_with_timeout(tool_registry, &tool_call, tool_timeout)
+                            .await
+                    })
+                    .buffered(max_concurrent_tool_calls)
+                    .try_collect()
+                    .await?;
+
+                for (tool_call, result) in tool_calls.iter().zip(results) {
+                    conversation.push(ConversationItem::FunctionResult {
+                        call_id: tool_call.call_id.clone(),
+                        result,
+                    });
                 }
             } else {
                 tracing::debug!("No more tool calls, returning final response");

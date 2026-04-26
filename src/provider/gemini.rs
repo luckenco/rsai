@@ -384,10 +384,43 @@ fn build_contents_from_conversation(
 ) -> Result<(Option<Content>, Vec<Content>), LlmError> {
     let mut system_instruction: Option<Content> = None;
     let mut contents: Vec<Content> = Vec::new();
+    let mut pending_role: Option<String> = None;
+    let mut pending_parts: Vec<Part> = Vec::new();
+
+    fn flush_pending_function_parts(
+        contents: &mut Vec<Content>,
+        pending_role: &mut Option<String>,
+        pending_parts: &mut Vec<Part>,
+    ) {
+        if let Some(role) = pending_role.take() {
+            if !pending_parts.is_empty() {
+                contents.push(Content {
+                    role: Some(role),
+                    parts: std::mem::take(pending_parts),
+                });
+            }
+        }
+    }
+
+    fn push_grouped_function_part(
+        contents: &mut Vec<Content>,
+        pending_role: &mut Option<String>,
+        pending_parts: &mut Vec<Part>,
+        role: &str,
+        part: Part,
+    ) {
+        if pending_role.as_deref() != Some(role) {
+            flush_pending_function_parts(contents, pending_role, pending_parts);
+            *pending_role = Some(role.to_string());
+        }
+        pending_parts.push(part);
+    }
 
     for item in conversation {
         match item {
             ConversationItem::Message { role, content } => {
+                flush_pending_function_parts(&mut contents, &mut pending_role, &mut pending_parts);
+
                 if role == "system" {
                     system_instruction = Some(Content {
                         role: None,
@@ -408,10 +441,13 @@ fn build_contents_from_conversation(
             ConversationItem::FunctionCall {
                 name, arguments, ..
             } => {
-                contents.push(Content {
-                    role: Some("model".to_string()),
-                    parts: vec![Part::function_call(name.clone(), arguments.clone())],
-                });
+                push_grouped_function_part(
+                    &mut contents,
+                    &mut pending_role,
+                    &mut pending_parts,
+                    "model",
+                    Part::function_call(name.clone(), arguments.clone()),
+                );
             }
             ConversationItem::FunctionResult { call_id, result } => {
                 // For Gemini, we need to find the function name from previous calls
@@ -425,13 +461,18 @@ fn build_contents_from_conversation(
                     other => serde_json::json!({ "result": other }),
                 };
 
-                contents.push(Content {
-                    role: Some("user".to_string()),
-                    parts: vec![Part::function_response(name, response_value)],
-                });
+                push_grouped_function_part(
+                    &mut contents,
+                    &mut pending_role,
+                    &mut pending_parts,
+                    "user",
+                    Part::function_response(name, response_value),
+                );
             }
         }
     }
+
+    flush_pending_function_parts(&mut contents, &mut pending_role, &mut pending_parts);
 
     Ok((system_instruction, contents))
 }
@@ -553,6 +594,8 @@ fn build_tools_config(
         function_declarations,
     }];
 
+    // Gemini exposes no native parallel_tool_calls request flag; the shared
+    // completion loop enforces local sequential or bounded-concurrent execution.
     let mode = match &tool_config.tool_choice {
         Some(crate::core::ToolChoice::None) => "NONE",
         Some(crate::core::ToolChoice::Auto) => "AUTO",
