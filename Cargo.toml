@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "rsai"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Constantin Luckenbach <cluckenbach@protonmail.com>"]
 edition = "2024"
 rust-version = "1.85"
@@ -22,7 +22,7 @@ serde = { version = "1.0.218", features = ["derive"] }
 schemars = "1.0.4"
 
 [dependencies]
-rsai-macros = { path = "macros", version = "0.2.0" }
+rsai-macros = { path = "macros", version = "0.4.0" }
 async-trait = "0.1.87"
 futures = "0.3.31"
 rand = "0.9.0"

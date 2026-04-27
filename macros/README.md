@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rsai-macros = "0.1.0-pre"
+rsai-macros = "0.4.0"
 ```
 
 ## 🛠️ Macros

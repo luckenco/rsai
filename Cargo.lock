@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "rsai"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "dotenv",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "rsai-macros"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
