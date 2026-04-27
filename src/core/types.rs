@@ -309,7 +309,7 @@ impl<Ctx: Send + Sync + 'static> ToolRegistry<Ctx> {
         };
 
         let result = if let Some(tool) = tool {
-            tool.execute(&self.context, tool_call.arguments.clone())
+            tool.execute_owned(self.context.clone(), tool_call.arguments.clone())
                 .await
         } else {
             Err(LlmError::ToolNotFound(tool_call.name.clone()))

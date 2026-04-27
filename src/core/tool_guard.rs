@@ -12,7 +12,11 @@ pub struct ToolCallingConfig {
     pub max_tool_calls_per_turn: usize,
     /// Maximum number of tools executed at the same time (default: 4)
     pub max_concurrent_tool_calls: usize,
-    /// Timeout for each individual tool execution (default: 30 seconds)
+    /// Timeout for each individual tool execution (default: 30 seconds).
+    ///
+    /// Generated synchronous `#[tool]` functions are run on Tokio's blocking pool so this timeout
+    /// can fire while they are blocked. Async tools and manual `ToolFunction` implementations must
+    /// remain cooperative and avoid blocking Tokio worker threads.
     pub tool_timeout: Duration,
 }
 
@@ -53,6 +57,10 @@ impl ToolCallingConfig {
     }
 
     /// Set the timeout for each individual tool execution.
+    ///
+    /// This timeout can stop waiting for generated synchronous `#[tool]` functions while their
+    /// blocking work finishes on Tokio's blocking pool. It does not preempt blocking work inside
+    /// async tools or manual `ToolFunction` implementations.
     pub fn with_tool_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
         self

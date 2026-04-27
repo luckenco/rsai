@@ -205,6 +205,42 @@ async fn gemini_parallel_tool_calls_false_executes_batch_sequentially() {
 }
 
 #[tokio::test]
+async fn gemini_tool_execution_timeout_triggers_error() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/models/mock-model:generateContent"))
+        .respond_with(gemini_tool_call_response(vec![gemini_function_call(1)]))
+        .mount(&server)
+        .await;
+
+    let (registry, executions, _) = tracked_tool_registry(Duration::from_millis(200));
+    let request = build_request(tool_config_for_registry(&registry, Some(false)));
+    let guard_config = ToolCallingConfig::new(3, Duration::from_secs(5))
+        .with_tool_timeout(Duration::from_millis(50));
+    let client = client_for(&server, Some(guard_config.clone()));
+
+    let err = client
+        .generate_completion::<TextResponse, ()>(
+            request,
+            TextResponse::format().expect("format"),
+            Some(&registry),
+        )
+        .await
+        .expect_err("tool timeout should trip");
+
+    match err {
+        LlmError::ToolExecutionTimeout { tool_name, timeout } => {
+            assert_eq!(tool_name, "tracked_tool");
+            assert_eq!(timeout, guard_config.tool_timeout);
+        }
+        other => panic!("expected ToolExecutionTimeout, got {other:?}"),
+    }
+
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn gemini_guard_rejects_too_many_tool_calls_before_execution() {
     let server = MockServer::start().await;
 

@@ -38,7 +38,52 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let is_async = input.sig.asyncness.is_some();
 
     // Generate the execution code
-    let execute_impl = generate_execute_impl(fn_name, &context_param, &params, is_async)?;
+    let execute_impl = generate_execute_impl(
+        fn_name,
+        &context_param,
+        &params,
+        is_async,
+        ContextAccess::Borrowed,
+    )?;
+    let execute_owned_impl = if is_async {
+        quote! {}
+    } else {
+        let owned_execute_impl = generate_execute_impl(
+            fn_name,
+            &context_param,
+            &params,
+            is_async,
+            ContextAccess::OwnedArc,
+        )?;
+        let unused_owned_ctx = if context_param.is_none() {
+            quote! {
+                let _ = __ctx;
+            }
+        } else {
+            quote! {}
+        };
+
+        quote! {
+            fn execute_owned(
+                self: ::std::sync::Arc<Self>,
+                __ctx: ::std::sync::Arc<__Ctx>,
+                params: ::serde_json::Value,
+            ) -> rsai::BoxFuture<'static, Result<::serde_json::Value, rsai::LlmError>>
+            where
+                Self: 'static,
+                __Ctx: Send + Sync + 'static,
+            {
+                use rsai::{BoxFuture, LlmError};
+                let _ = self;
+                #unused_owned_ctx
+                Box::pin(async move {
+                    rsai::__private::spawn_blocking_tool(move || {
+                        #owned_execute_impl
+                    }).await
+                })
+            }
+        }
+    };
 
     // Generate inherent impl with schema() method.
     // This allows calling .schema() without type annotations since Rust prefers
@@ -76,6 +121,8 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                         #execute_impl
                     })
                 }
+
+                #execute_owned_impl
             }
         }
     } else {
@@ -93,6 +140,8 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                         #execute_impl
                     })
                 }
+
+                #execute_owned_impl
             }
         }
     };
@@ -387,11 +436,18 @@ fn type_to_json_type(ty: &Type) -> Result<&'static str> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ContextAccess {
+    Borrowed,
+    OwnedArc,
+}
+
 fn generate_execute_impl(
     fn_name: &syn::Ident,
     context_param: &Option<ContextParam>,
     params: &[Parameter],
     is_async: bool,
+    context_access: ContextAccess,
 ) -> Result<TokenStream> {
     let param_extractions = params.iter().map(|param| {
         let name = &param.name;
@@ -448,8 +504,14 @@ fn generate_execute_impl(
     // Generate context extraction if needed
     let context_extraction = if let Some(ctx) = context_param {
         let ctx_name = quote::format_ident!("{}", ctx.name);
-        quote! {
-            let #ctx_name = rsai::Ctx(__ctx.as_ref());
+        let ctx_inner_ty = &ctx.inner_ty;
+        match context_access {
+            ContextAccess::Borrowed => quote! {
+                let #ctx_name = rsai::Ctx(::std::convert::AsRef::<#ctx_inner_ty>::as_ref(__ctx));
+            },
+            ContextAccess::OwnedArc => quote! {
+                let #ctx_name = rsai::Ctx(::std::convert::AsRef::<#ctx_inner_ty>::as_ref(__ctx.as_ref()));
+            },
         }
     } else {
         quote! {}

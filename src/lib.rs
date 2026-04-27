@@ -80,6 +80,32 @@ pub use core::BoxFuture;
 pub use core::LlmError;
 pub type Result<T> = std::result::Result<T, LlmError>;
 
+#[doc(hidden)]
+pub mod __private {
+    pub async fn spawn_blocking_tool<F>(f: F) -> crate::Result<serde_json::Value>
+    where
+        F: FnOnce() -> crate::Result<serde_json::Value> + Send + 'static,
+    {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return f();
+        };
+
+        match handle.spawn_blocking(f).await {
+            Ok(result) => result,
+            Err(err) => {
+                if err.is_panic() {
+                    std::panic::resume_unwind(err.into_panic());
+                }
+
+                Err(crate::LlmError::ToolExecution {
+                    message: "Blocking tool task failed".to_string(),
+                    source: Some(Box::new(err)),
+                })
+            }
+        }
+    }
+}
+
 // Gen AI request builders
 pub use core::llm;
 

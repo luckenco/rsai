@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::responses::request::Format;
 
@@ -22,11 +23,25 @@ pub trait LlmProvider {
 
 pub trait ToolFunction<Ctx = ()>: Send + Sync {
     fn schema(&self) -> Tool;
+
     fn execute<'a>(
         &'a self,
         ctx: &'a Ctx,
         params: serde_json::Value,
     ) -> BoxFuture<'a, Result<serde_json::Value, LlmError>>;
+
+    #[doc(hidden)]
+    fn execute_owned(
+        self: Arc<Self>,
+        ctx: Arc<Ctx>,
+        params: serde_json::Value,
+    ) -> BoxFuture<'static, Result<serde_json::Value, LlmError>>
+    where
+        Self: 'static,
+        Ctx: Send + Sync + 'static,
+    {
+        Box::pin(async move { self.execute(ctx.as_ref(), params).await })
+    }
 }
 
 pub trait CompletionTarget: Sized + Send {

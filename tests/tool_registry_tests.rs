@@ -1,4 +1,4 @@
-use rsai::{BoxFuture, LlmError, Tool, ToolCall, ToolFunction, ToolRegistry, tool};
+use rsai::{BoxFuture, Ctx, LlmError, Tool, ToolCall, ToolFunction, ToolRegistry, tool};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +19,39 @@ async fn test_tool_b(value: f64) -> serde_json::Value {
     let _ = value;
     sleep(Duration::from_millis(1)).await;
     json!({ "result": "success_b" })
+}
+
+#[tool]
+/// Sleep synchronously before returning.
+/// delay_ms: Sleep duration in milliseconds.
+fn blocking_sync_sleep(delay_ms: u64) -> serde_json::Value {
+    std::thread::sleep(Duration::from_millis(delay_ms));
+    json!({ "delay_ms": delay_ms })
+}
+
+struct BlockingSleepConfig {
+    delay: Duration,
+}
+
+struct BlockingSleepContext {
+    config: BlockingSleepConfig,
+}
+
+impl AsRef<BlockingSleepConfig> for BlockingSleepContext {
+    fn as_ref(&self) -> &BlockingSleepConfig {
+        &self.config
+    }
+}
+
+#[tool]
+/// Sleep synchronously using context before returning.
+/// label: Label to return after the sleep.
+fn context_blocking_sync_sleep(
+    config: Ctx<&BlockingSleepConfig>,
+    label: String,
+) -> serde_json::Value {
+    std::thread::sleep(config.delay);
+    json!({ "label": label })
 }
 
 fn tool_a() -> Arc<dyn ToolFunction<()>> {
@@ -147,6 +180,56 @@ async fn test_overwrite_functionality() {
     assert_eq!(
         schemas[0].description,
         Some("Alternate implementation of tool A".to_string())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generated_sync_tool_timeout_fires_while_blocking_work_runs() {
+    let registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(BlockingSyncSleepTool))
+        .expect("blocking tool registration");
+
+    let tool_call = ToolCall {
+        id: "call_blocking".to_string(),
+        call_id: "call_blocking".to_string(),
+        name: "blocking_sync_sleep".to_string(),
+        arguments: json!({ "delay_ms": 200 }),
+    };
+
+    let result =
+        tokio::time::timeout(Duration::from_millis(25), registry.execute(&tool_call)).await;
+
+    assert!(
+        result.is_err(),
+        "generated sync tools should not block Tokio timeout polling"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generated_context_sync_tool_timeout_fires_while_blocking_work_runs() {
+    let registry = ToolRegistry::with_context(BlockingSleepContext {
+        config: BlockingSleepConfig {
+            delay: Duration::from_millis(200),
+        },
+    });
+    registry
+        .register(Arc::new(ContextBlockingSyncSleepTool))
+        .expect("context blocking tool registration");
+
+    let tool_call = ToolCall {
+        id: "call_context_blocking".to_string(),
+        call_id: "call_context_blocking".to_string(),
+        name: "context_blocking_sync_sleep".to_string(),
+        arguments: json!({ "label": "ctx" }),
+    };
+
+    let result =
+        tokio::time::timeout(Duration::from_millis(25), registry.execute(&tool_call)).await;
+
+    assert!(
+        result.is_err(),
+        "generated context sync tools should not block Tokio timeout polling"
     );
 }
 
