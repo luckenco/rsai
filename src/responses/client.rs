@@ -403,7 +403,7 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
     ) -> Result<serde_json::Value, LlmError> {
         match arguments {
             serde_json::Value::String(s) => serde_json::from_str(s).map_err(|e| LlmError::Parse {
-                message: format!("Failed to parse tool arguments: {s}"),
+                message: "Failed to parse tool arguments".to_string(),
                 source: Box::new(e),
             }),
             other => Ok(other.clone()),
@@ -735,6 +735,28 @@ mod tests {
             top_p: None,
             truncation: None,
             user: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_function_arguments_error_does_not_include_raw_arguments() {
+        let client = ResponsesClient::new(TestProviderConfig::new("http://localhost".to_string()))
+            .expect("client");
+        let raw_arguments = "{\"secret\":\"do-not-log\"";
+        let result =
+            client.parse_function_arguments(&serde_json::Value::String(raw_arguments.to_string()));
+
+        match result {
+            Err(LlmError::Parse { message, source }) => {
+                assert_eq!(message, "Failed to parse tool arguments");
+                assert!(!message.contains(raw_arguments));
+                assert!(source.is::<serde_json::Error>());
+                assert!(!source.to_string().contains(raw_arguments));
+
+                let display = LlmError::Parse { message, source }.to_string();
+                assert!(!display.contains(raw_arguments));
+            }
+            other => panic!("Expected Parse Error, got {other:?}"),
         }
     }
 
