@@ -961,6 +961,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_response_parsing_rejects_unknown_fields() {
+        let server = MockServer::start().await;
+
+        let output_json = serde_json::json!({
+            "value": "ok",
+            "extra": true
+        });
+
+        let response = serde_json::json!({
+            "id": "resp_extra_field",
+            "model": "test-model",
+            "output": [{
+                "id": "msg_extra_field",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": output_json.to_string()
+                }]
+            }],
+            "usage": { "input_tokens": 0, "output_tokens": 0, "total_tokens": 0 }
+        });
+
+        let result = run_parsing_test::<TestResponse>(&server, response).await;
+
+        match result {
+            Err(LlmError::Parse { .. }) => (),
+            _ => panic!("Expected Parse Error, got {:?}", result),
+        }
+    }
+
+    #[tokio::test]
     async fn test_response_parsing_empty() {
         let server = MockServer::start().await;
 
