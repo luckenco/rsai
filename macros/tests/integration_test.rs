@@ -1,4 +1,17 @@
-use rsai_macros::tool;
+use rsai_macros::{completion_schema, tool};
+
+#[completion_schema]
+#[derive(Debug, PartialEq)]
+struct StrictResponse {
+    value: String,
+}
+
+#[test]
+fn test_completion_schema_rejects_unknown_fields_locally() {
+    let parsed: Result<StrictResponse, _> = serde_json::from_str(r#"{"value":"ok","extra":true}"#);
+
+    assert!(parsed.is_err());
+}
 
 #[tool]
 /// Get current temperature for a given location.

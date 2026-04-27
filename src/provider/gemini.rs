@@ -11,9 +11,9 @@ use crate::completions::{
     CompletionClient, CompletionProviderConfig, CompletionRequestBuilder, ConversationItem,
 };
 use crate::core::{
-    FunctionCallData, HttpClientConfig, InspectorConfig, LanguageModelUsage, LlmBuilder, LlmError,
-    LlmProvider, ProviderResponse, ResponseContent, StructuredRequest, ToolCallingConfig,
-    ToolCallingGuard, ToolRegistry,
+    BaseUrlSecurity, FunctionCallData, HttpClientConfig, InspectorConfig, LanguageModelUsage,
+    LlmBuilder, LlmError, LlmProvider, ProviderResponse, ResponseContent, StructuredRequest,
+    ToolCallingConfig, ToolCallingGuard, ToolRegistry,
 };
 use crate::provider::constants::gemini;
 use crate::responses::{Format, request::FormatType};
@@ -189,6 +189,7 @@ pub struct UsageMetadata {
 pub struct GeminiConfig {
     pub api_key: String,
     pub base_url: String,
+    pub base_url_security: BaseUrlSecurity,
     pub tool_calling_config: Option<ToolCallingConfig>,
     pub http_config: HttpClientConfig,
     /// Configuration for request/response inspection
@@ -200,14 +201,36 @@ impl GeminiConfig {
         Self {
             api_key,
             base_url: gemini::API_BASE.to_string(),
+            base_url_security: BaseUrlSecurity::HttpsOnly,
             tool_calling_config: Some(ToolCallingConfig::default()),
             http_config: HttpClientConfig::default(),
             inspector_config: None,
         }
     }
 
+    /// Set a custom Gemini-compatible base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the Gemini API key in the `x-goog-api-key` header. This method
+    /// requires HTTPS; use [`Self::with_insecure_base_url`] only for trusted local or proxy
+    /// endpoints that intentionally use HTTP.
     pub fn with_base_url(mut self, base_url: String) -> Self {
         self.base_url = base_url;
+        self.base_url_security = BaseUrlSecurity::HttpsOnly;
+        self
+    }
+
+    /// Set a custom Gemini-compatible HTTP base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the Gemini API key in the `x-goog-api-key` header. Use this
+    /// only for trusted local or proxy endpoints because the API key may be sent over plaintext
+    /// HTTP.
+    pub fn with_insecure_base_url(mut self, base_url: String) -> Self {
+        self.base_url = base_url;
+        self.base_url_security = BaseUrlSecurity::AllowInsecureHttp;
         self
     }
 
@@ -228,7 +251,7 @@ impl GeminiConfig {
 
     pub fn get_tool_calling_guard(&self) -> ToolCallingGuard {
         if let Some(ref config) = self.tool_calling_config {
-            ToolCallingGuard::with_limits(config.max_iterations, config.timeout)
+            ToolCallingGuard::from_config(config)
         } else {
             ToolCallingGuard::new()
         }
@@ -238,6 +261,10 @@ impl GeminiConfig {
 impl CompletionProviderConfig for GeminiConfig {
     fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    fn base_url_security(&self) -> BaseUrlSecurity {
+        self.base_url_security
     }
 
     fn auth_header(&self) -> (String, String) {
@@ -342,16 +369,7 @@ impl CompletionRequestBuilder for GeminiRequestBuilder {
         let candidate = response.candidates.as_ref()?.first()?;
         let content = candidate.content.as_ref()?;
 
-        let mut calls = Vec::new();
-        for (idx, part) in content.parts.iter().enumerate() {
-            if let Part::FunctionCall(FunctionCallPart { function_call }) = part {
-                calls.push(FunctionCallData {
-                    id: format!("call_{}", idx),
-                    name: function_call.name.clone(),
-                    arguments: function_call.args.clone(),
-                });
-            }
-        }
+        let calls: Vec<FunctionCallData> = extract_function_calls_from_parts(&content.parts);
 
         if calls.is_empty() { None } else { Some(calls) }
     }
@@ -366,10 +384,43 @@ fn build_contents_from_conversation(
 ) -> Result<(Option<Content>, Vec<Content>), LlmError> {
     let mut system_instruction: Option<Content> = None;
     let mut contents: Vec<Content> = Vec::new();
+    let mut pending_role: Option<String> = None;
+    let mut pending_parts: Vec<Part> = Vec::new();
+
+    fn flush_pending_function_parts(
+        contents: &mut Vec<Content>,
+        pending_role: &mut Option<String>,
+        pending_parts: &mut Vec<Part>,
+    ) {
+        if let Some(role) = pending_role.take() {
+            if !pending_parts.is_empty() {
+                contents.push(Content {
+                    role: Some(role),
+                    parts: std::mem::take(pending_parts),
+                });
+            }
+        }
+    }
+
+    fn push_grouped_function_part(
+        contents: &mut Vec<Content>,
+        pending_role: &mut Option<String>,
+        pending_parts: &mut Vec<Part>,
+        role: &str,
+        part: Part,
+    ) {
+        if pending_role.as_deref() != Some(role) {
+            flush_pending_function_parts(contents, pending_role, pending_parts);
+            *pending_role = Some(role.to_string());
+        }
+        pending_parts.push(part);
+    }
 
     for item in conversation {
         match item {
             ConversationItem::Message { role, content } => {
+                flush_pending_function_parts(&mut contents, &mut pending_role, &mut pending_parts);
+
                 if role == "system" {
                     system_instruction = Some(Content {
                         role: None,
@@ -390,10 +441,13 @@ fn build_contents_from_conversation(
             ConversationItem::FunctionCall {
                 name, arguments, ..
             } => {
-                contents.push(Content {
-                    role: Some("model".to_string()),
-                    parts: vec![Part::function_call(name.clone(), arguments.clone())],
-                });
+                push_grouped_function_part(
+                    &mut contents,
+                    &mut pending_role,
+                    &mut pending_parts,
+                    "model",
+                    Part::function_call(name.clone(), arguments.clone()),
+                );
             }
             ConversationItem::FunctionResult { call_id, result } => {
                 // For Gemini, we need to find the function name from previous calls
@@ -407,13 +461,18 @@ fn build_contents_from_conversation(
                     other => serde_json::json!({ "result": other }),
                 };
 
-                contents.push(Content {
-                    role: Some("user".to_string()),
-                    parts: vec![Part::function_response(name, response_value)],
-                });
+                push_grouped_function_part(
+                    &mut contents,
+                    &mut pending_role,
+                    &mut pending_parts,
+                    "user",
+                    Part::function_response(name, response_value),
+                );
             }
         }
     }
+
+    flush_pending_function_parts(&mut contents, &mut pending_role, &mut pending_parts);
 
     Ok((system_instruction, contents))
 }
@@ -535,6 +594,8 @@ fn build_tools_config(
         function_declarations,
     }];
 
+    // Gemini exposes no native parallel_tool_calls request flag; the shared
+    // completion loop enforces local sequential or bounded-concurrent execution.
     let mode = match &tool_config.tool_choice {
         Some(crate::core::ToolChoice::None) => "NONE",
         Some(crate::core::ToolChoice::Auto) => "AUTO",
@@ -565,28 +626,42 @@ fn build_tools_config(
     )
 }
 
-fn parse_parts_to_content(parts: &[Part]) -> Result<ResponseContent, LlmError> {
-    let mut text_parts = Vec::new();
-    let mut function_calls = Vec::new();
-
-    for (idx, part) in parts.iter().enumerate() {
-        match part {
-            Part::Text(TextPart { text }) => text_parts.push(text.clone()),
-            Part::FunctionCall(FunctionCallPart { function_call }) => {
-                function_calls.push(FunctionCallData {
-                    id: format!("call_{}", idx),
+/// Extract function calls from Gemini response parts with unique IDs.
+fn extract_function_calls_from_parts(parts: &[Part]) -> Vec<FunctionCallData> {
+    parts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, part)| {
+            if let Part::FunctionCall(FunctionCallPart { function_call }) = part {
+                Some(FunctionCallData {
+                    id: format!("call_{}_{:08x}", idx, rand::random::<u32>()),
                     name: function_call.name.clone(),
                     arguments: function_call.args.clone(),
-                });
+                })
+            } else {
+                None
             }
-            Part::FunctionResponse(_) => {}
-        }
+        })
+        .collect()
+}
+
+fn parse_parts_to_content(parts: &[Part]) -> Result<ResponseContent, LlmError> {
+    let function_calls = extract_function_calls_from_parts(parts);
+    if !function_calls.is_empty() {
+        return Ok(ResponseContent::FunctionCalls(function_calls));
     }
 
-    if !function_calls.is_empty() {
-        Ok(ResponseContent::FunctionCalls(function_calls))
-    } else if !text_parts.is_empty() {
-        Ok(ResponseContent::Text(text_parts.join("")))
+    let text: String = parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Text(TextPart { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    if !text.is_empty() {
+        Ok(ResponseContent::Text(text))
     } else {
         Err(LlmError::Provider {
             message: "Empty response from Gemini".to_string(),
@@ -601,34 +676,53 @@ fn parse_parts_to_content(parts: &[Part]) -> Result<ResponseContent, LlmError> {
 
 pub struct GeminiClient {
     completion_client: CompletionClient<GeminiConfig>,
-    config: GeminiConfig,
 }
 
 impl GeminiClient {
     pub fn new(api_key: String) -> Result<Self, LlmError> {
-        let config = GeminiConfig::new(api_key.clone());
-        let completion_client = CompletionClient::new(GeminiConfig::new(api_key))?;
-
+        let config = GeminiConfig::new(api_key);
         Ok(Self {
-            completion_client,
-            config,
+            completion_client: CompletionClient::new(config)?,
         })
     }
 
+    /// Set a custom Gemini-compatible base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the Gemini API key in the `x-goog-api-key` header. This method
+    /// requires HTTPS; use [`Self::with_insecure_base_url`] only for trusted local or proxy
+    /// endpoints that intentionally use HTTP.
     pub fn with_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: base_url.clone(),
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: self.config.http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
-        };
-        self.config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
+            api_key: config.api_key.clone(),
             base_url,
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: self.config.http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
+            base_url_security: BaseUrlSecurity::HttpsOnly,
+            tool_calling_config: config.tool_calling_config.clone(),
+            http_config: config.http_config.clone(),
+            inspector_config: config.inspector_config.clone(),
+        };
+        self.completion_client = CompletionClient::new(new_config)?;
+        Ok(self)
+    }
+
+    /// Set a custom Gemini-compatible HTTP base URL.
+    ///
+    /// # Security
+    ///
+    /// Requests to this URL include the Gemini API key in the `x-goog-api-key` header. Use this
+    /// only for trusted local or proxy endpoints because the API key may be sent over plaintext
+    /// HTTP.
+    pub fn with_insecure_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
+        let new_config = GeminiConfig {
+            api_key: config.api_key.clone(),
+            base_url,
+            base_url_security: BaseUrlSecurity::AllowInsecureHttp,
+            tool_calling_config: config.tool_calling_config.clone(),
+            http_config: config.http_config.clone(),
+            inspector_config: config.inspector_config.clone(),
         };
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
@@ -638,27 +732,29 @@ impl GeminiClient {
         mut self,
         tool_config: ToolCallingConfig,
     ) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: self.config.base_url.clone(),
-            tool_calling_config: Some(tool_config.clone()),
-            http_config: self.config.http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            base_url_security: config.base_url_security,
+            tool_calling_config: Some(tool_config),
+            http_config: config.http_config.clone(),
+            inspector_config: config.inspector_config.clone(),
         };
-        self.config.tool_calling_config = Some(tool_config);
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
     }
 
     pub fn with_http_config(mut self, http_config: HttpClientConfig) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: self.config.base_url.clone(),
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: http_config.clone(),
-            inspector_config: self.config.inspector_config.clone(),
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            base_url_security: config.base_url_security,
+            tool_calling_config: config.tool_calling_config.clone(),
+            http_config,
+            inspector_config: config.inspector_config.clone(),
         };
-        self.config.http_config = http_config;
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
     }
@@ -667,14 +763,15 @@ impl GeminiClient {
         mut self,
         inspector_config: InspectorConfig,
     ) -> Result<Self, LlmError> {
+        let config = &self.completion_client.config;
         let new_config = GeminiConfig {
-            api_key: self.config.api_key.clone(),
-            base_url: self.config.base_url.clone(),
-            tool_calling_config: self.config.tool_calling_config.clone(),
-            http_config: self.config.http_config.clone(),
-            inspector_config: Some(inspector_config.clone()),
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            base_url_security: config.base_url_security,
+            tool_calling_config: config.tool_calling_config.clone(),
+            http_config: config.http_config.clone(),
+            inspector_config: Some(inspector_config),
         };
-        self.config.inspector_config = Some(inspector_config);
         self.completion_client = CompletionClient::new(new_config)?;
         Ok(self)
     }
@@ -701,14 +798,14 @@ impl LlmProvider for GeminiClient {
             .and_then(|tc| tc.tools.as_ref())
             .is_some();
 
-        if has_tools && tool_registry.is_some() {
-            let mut guard = self.config.get_tool_calling_guard();
+        if has_tools && let Some(tool_registry) = tool_registry {
+            let mut guard = self.completion_client.config.get_tool_calling_guard();
             let provider_response = self
                 .completion_client
                 .handle_tool_calling_loop::<_, Ctx>(
                     &builder,
                     request,
-                    tool_registry.unwrap(),
+                    tool_registry,
                     &mut guard,
                     format,
                 )
@@ -717,7 +814,8 @@ impl LlmProvider for GeminiClient {
         }
 
         // Single request without tool calling loop
-        let conversation = convert_messages_to_conversation(&request.messages)?;
+        let conversation =
+            crate::completions::client::convert_messages_to_conversation(&request.messages)?;
         let api_request = builder.build_request(&request, &format, &conversation)?;
         let api_response = self
             .completion_client
@@ -726,38 +824,6 @@ impl LlmProvider for GeminiClient {
         let provider_response = builder.parse_response(api_response)?;
         T::parse_response(provider_response)
     }
-}
-
-fn convert_messages_to_conversation(
-    messages: &[crate::core::ConversationMessage],
-) -> Result<Vec<ConversationItem>, LlmError> {
-    messages
-        .iter()
-        .map(|msg| match msg {
-            crate::core::ConversationMessage::Chat(m) => {
-                let role = match m.role {
-                    crate::core::ChatRole::System => "system",
-                    crate::core::ChatRole::User => "user",
-                    crate::core::ChatRole::Assistant => "assistant",
-                };
-                Ok(ConversationItem::Message {
-                    role: role.to_string(),
-                    content: m.content.clone(),
-                })
-            }
-            crate::core::ConversationMessage::ToolCall(tc) => Ok(ConversationItem::FunctionCall {
-                id: tc.call_id.clone(),
-                name: tc.name.clone(),
-                arguments: tc.arguments.clone(),
-            }),
-            crate::core::ConversationMessage::ToolCallResult(tr) => {
-                Ok(ConversationItem::FunctionResult {
-                    call_id: tr.tool_call_id.clone(),
-                    result: tr.content.clone(),
-                })
-            }
-        })
-        .collect()
 }
 
 // ============================================================================
@@ -776,6 +842,10 @@ pub fn create_gemini_client_from_builder<State, Ctx>(
 
     if let Some(http_config) = builder.get_http_config() {
         client = client.with_http_config(http_config.clone())?;
+    }
+
+    if let Some(tool_calling_config) = builder.get_tool_calling_config() {
+        client = client.with_tool_calling_config(tool_calling_config.clone())?;
     }
 
     if let Some(inspector_config) = builder.get_inspector_config() {

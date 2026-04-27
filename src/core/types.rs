@@ -296,7 +296,7 @@ impl<Ctx: Send + Sync + 'static> ToolRegistry<Ctx> {
         err
     )]
     pub async fn execute(&self, tool_call: &ToolCall) -> Result<serde_json::Value, LlmError> {
-        tracing::trace!(arguments = ?tool_call.arguments, "Executing tool with arguments");
+        tracing::trace!("Executing tool");
 
         let tool = {
             let r_tools = self
@@ -309,7 +309,7 @@ impl<Ctx: Send + Sync + 'static> ToolRegistry<Ctx> {
         };
 
         let result = if let Some(tool) = tool {
-            tool.execute(&self.context, tool_call.arguments.clone())
+            tool.execute_owned(self.context.clone(), tool_call.arguments.clone())
                 .await
         } else {
             Err(LlmError::ToolNotFound(tool_call.name.clone()))
@@ -477,7 +477,36 @@ impl CompletionTarget for TextResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(self.0.clone())
+        }
+    }
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured log lock poisoned")
+                .extend(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct ObjectTool;
 
@@ -531,5 +560,41 @@ mod tests {
         assert_eq!(result["name"], "test");
         assert_eq!(result["value"], 42);
         assert_eq!(result["active"], true);
+    }
+
+    #[tokio::test]
+    async fn tool_execution_traces_do_not_include_arguments() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(CapturedLogs(logs.clone()))
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(ObjectTool))
+            .expect("Failed to register object_tool");
+
+        let secret = "sk-test-secret-tool-argument";
+        let tool_call = ToolCall {
+            id: "test_Id".to_string(),
+            call_id: "call_123".to_string(),
+            name: "object_tool".to_string(),
+            arguments: serde_json::json!({ "api_key": secret }),
+        };
+
+        registry.execute(&tool_call).await.unwrap();
+        drop(_guard);
+
+        let logs = String::from_utf8(logs.lock().expect("captured log lock poisoned").clone())
+            .expect("captured logs should be valid UTF-8");
+
+        assert!(logs.contains("Executing tool"));
+        assert!(!logs.contains(secret));
+        assert!(!logs.contains("api_key"));
     }
 }

@@ -11,7 +11,7 @@ use crate::{
     CompletionTarget, Provider,
     core::{
         ChatRole, ConversationMessage, HttpClient, InspectorConfig, LlmError, StructuredRequest,
-        Tool, ToolCall, ToolCallingGuard, ToolRegistry,
+        Tool, ToolCall, ToolCallingGuard, ToolRegistry, http::validate_provider_base_url,
     },
     responses::{
         Format, FormatType, FunctionToolCall, FunctionToolCallOutput, JsonSchema, JsonSchemaType,
@@ -20,11 +20,12 @@ use crate::{
         response::{MessageContent, OutputContent, Response},
     },
 };
+use futures::{StreamExt, TryStreamExt, stream};
 use schemars::schema_for;
 use tracing;
 
 // Re-export HttpClientConfig from core for backwards compatibility
-pub use crate::core::HttpClientConfig;
+pub use crate::core::{BaseUrlSecurity, HttpClientConfig};
 
 /// Configuration trait for providers that use the OpenAI-style responses API
 pub trait ResponsesProviderConfig {
@@ -33,6 +34,11 @@ pub trait ResponsesProviderConfig {
 
     /// Base URL for the API (e.g., `https://api.openai.com`)
     fn base_url(&self) -> &str;
+
+    /// Security policy for custom provider base URLs.
+    fn base_url_security(&self) -> BaseUrlSecurity {
+        BaseUrlSecurity::HttpsOnly
+    }
 
     /// API endpoint for responses (e.g., `/v1/responses`)
     fn endpoint(&self) -> &str;
@@ -69,6 +75,8 @@ pub struct ResponsesClient<P: ResponsesProviderConfig> {
 impl<P: ResponsesProviderConfig> ResponsesClient<P> {
     /// Create a new responses client with the given configuration
     pub fn new(config: P) -> Result<Self, LlmError> {
+        validate_provider_base_url(config.base_url(), config.base_url_security())?;
+
         let http_config = config.http_config();
         let user_agent = config.user_agent();
         let inspector_config = config.inspector_config().cloned();
@@ -112,7 +120,6 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
     {
         let timeout_duration = guard.timeout;
 
-        // Use tokio::time::timeout to add timeout protection
         match tokio::time::timeout(
             timeout_duration,
             self.handle_tool_calling_loop_internal::<T, Ctx>(request, tool_registry, guard, format),
@@ -156,7 +163,6 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
             .unwrap_or(true);
 
         loop {
-            // Check iteration limit before processing
             guard.increment_iteration()?;
 
             let iteration_span =
@@ -181,11 +187,14 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
                 "Model requested tool execution"
             );
 
+            guard.check_tool_calls_for_turn(function_calls.len())?;
+
             self.process_function_calls(
                 &function_calls,
                 &mut responses_input,
                 tool_registry,
                 is_parallel,
+                guard,
             )
             .await?;
         }
@@ -223,56 +232,73 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         responses_input: &mut Vec<InputItem>,
         tool_registry: &ToolRegistry<Ctx>,
         is_parallel: bool,
+        guard: &ToolCallingGuard,
     ) -> Result<(), LlmError>
     where
         Ctx: Send + Sync + 'static,
     {
         if is_parallel && function_calls.len() > 1 {
-            self.process_parallel_function_calls(function_calls, responses_input, tool_registry)
-                .await
+            self.process_parallel_function_calls(
+                function_calls,
+                responses_input,
+                tool_registry,
+                guard,
+            )
+            .await
         } else {
-            self.process_sequential_function_calls(function_calls, responses_input, tool_registry)
-                .await
+            self.process_sequential_function_calls(
+                function_calls,
+                responses_input,
+                tool_registry,
+                guard,
+            )
+            .await
         }
     }
 
-    /// Process function calls in parallel (all calls first, then all results)
+    /// Process function calls in parallel (all calls added first, tools executed concurrently, then all results added).
+    ///
+    /// On failure, completed tools may have produced side-effects but no results are added to `responses_input`.
     pub async fn process_parallel_function_calls<Ctx>(
         &self,
         function_calls: &[&FunctionToolCall],
         responses_input: &mut Vec<InputItem>,
         tool_registry: &ToolRegistry<Ctx>,
+        guard: &ToolCallingGuard,
     ) -> Result<(), LlmError>
     where
         Ctx: Send + Sync + 'static,
     {
-        let mut pending_executions = Vec::new();
-
-        // Add all function calls to input and prepare for execution
+        // Add all function calls to input first
+        let mut tool_calls = Vec::with_capacity(function_calls.len());
         for function_call in function_calls {
             responses_input.push(InputItem::FunctionCall((*function_call).clone()));
 
             let arguments = self.parse_function_arguments(&function_call.arguments)?;
-            pending_executions.push((
-                function_call.id.clone(),
-                function_call.call_id.clone(),
-                function_call.name.clone(),
+            tool_calls.push(ToolCall {
+                id: function_call.id.clone(),
+                call_id: function_call.call_id.clone(),
+                name: function_call.name.clone(),
                 arguments,
-            ));
+            });
         }
 
-        // Execute all tools and add their results
-        for (id, call_id, name, arguments) in pending_executions {
-            let tool_call = ToolCall {
-                id,
-                call_id: call_id.clone(),
-                name,
-                arguments,
-            };
-            let result = tool_registry.execute(&tool_call).await?;
+        // Execute tools with bounded concurrency, preserving result order.
+        let tool_timeout = guard.tool_timeout;
+        let max_concurrent_tool_calls = guard.max_concurrent_tool_calls();
+        let results: Vec<serde_json::Value> = stream::iter(tool_calls.iter().cloned())
+            .map(|tool_call| async move {
+                self.execute_tool_with_timeout(tool_registry, &tool_call, tool_timeout)
+                    .await
+            })
+            .buffered(max_concurrent_tool_calls)
+            .try_collect()
+            .await?;
 
+        // Add all results in order
+        for (tool_call, result) in tool_calls.iter().zip(results) {
             responses_input.push(InputItem::FunctionCallOutput(FunctionToolCallOutput {
-                call_id,
+                call_id: tool_call.call_id.clone(),
                 output: result,
                 r#type: "function_call_output".to_string(),
             }));
@@ -287,6 +313,7 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         function_calls: &[&FunctionToolCall],
         responses_input: &mut Vec<InputItem>,
         tool_registry: &ToolRegistry<Ctx>,
+        guard: &ToolCallingGuard,
     ) -> Result<(), LlmError>
     where
         Ctx: Send + Sync + 'static,
@@ -302,7 +329,9 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
                 arguments,
             };
 
-            let result = tool_registry.execute(&tool_call).await?;
+            let result = self
+                .execute_tool_with_timeout(tool_registry, &tool_call, guard.tool_timeout)
+                .await?;
 
             responses_input.push(InputItem::FunctionCallOutput(FunctionToolCallOutput {
                 call_id: function_call.call_id.clone(),
@@ -314,6 +343,59 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
         Ok(())
     }
 
+    async fn execute_tool_with_timeout<Ctx>(
+        &self,
+        tool_registry: &ToolRegistry<Ctx>,
+        tool_call: &ToolCall,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, LlmError>
+    where
+        Ctx: Send + Sync + 'static,
+    {
+        match tokio::time::timeout(timeout, tool_registry.execute(tool_call)).await {
+            Ok(result) => result,
+            Err(_) => Err(LlmError::ToolExecutionTimeout {
+                tool_name: tool_call.name.clone(),
+                timeout,
+            }),
+        }
+    }
+
+    /// Shared generate_completion for responses-API providers (OpenAI, OpenRouter).
+    ///
+    /// Handles the tool calling loop when tools are present, or makes a single
+    /// request otherwise.
+    pub async fn generate_completion<T, Ctx>(
+        &self,
+        request: StructuredRequest,
+        format: crate::responses::request::Format,
+        tool_registry: Option<&ToolRegistry<Ctx>>,
+        mut guard: ToolCallingGuard,
+    ) -> Result<T::Output, LlmError>
+    where
+        T: CompletionTarget + Send,
+        Ctx: Send + Sync + 'static,
+    {
+        let has_tools = request
+            .tool_config
+            .as_ref()
+            .and_then(|tc| tc.tools.as_ref())
+            .is_some();
+
+        if has_tools && let Some(tool_registry) = tool_registry {
+            return self
+                .handle_tool_calling_loop::<T, Ctx>(request, tool_registry, &mut guard, format)
+                .await;
+        }
+
+        let responses_input = convert_messages_to_responses_format(request.messages.clone())?;
+        let responses_request =
+            self.build_request_with_format(&request, &responses_input, format)?;
+        let api_response = self.make_api_request(responses_request).await?;
+        let provider_response = convert_to_provider_response(api_response, self.config.provider())?;
+        T::parse_response(provider_response)
+    }
+
     /// Parse function arguments from JSON value
     pub fn parse_function_arguments(
         &self,
@@ -321,7 +403,7 @@ impl<P: ResponsesProviderConfig> ResponsesClient<P> {
     ) -> Result<serde_json::Value, LlmError> {
         match arguments {
             serde_json::Value::String(s) => serde_json::from_str(s).map_err(|e| LlmError::Parse {
-                message: format!("Failed to parse tool arguments: {s}"),
+                message: "Failed to parse tool arguments".to_string(),
                 source: Box::new(e),
             }),
             other => Ok(other.clone()),
@@ -346,7 +428,6 @@ pub(crate) fn build_request_payload_with_format(
         tool_choice: None,
         instructions: None,
         max_output_tokens: None,
-        max_tool_calls: None,
         store: None,
         top_logprobs: None,
         top_p: None,
@@ -510,58 +591,52 @@ pub(crate) fn create_text_format() -> Format {
     }
 }
 
-/// Convert OpenAI API response to provider-agnostic ProviderResponse
+/// Convert OpenAI API response to provider-agnostic ProviderResponse.
+///
+/// Aggregates all output items: collects function calls across all items,
+/// concatenates text from all messages, and surfaces refusals.
+/// Function calls take priority over text if both are present.
 pub fn convert_to_provider_response(
     res: Response,
     provider: crate::provider::Provider,
 ) -> Result<crate::core::ProviderResponse, LlmError> {
     use crate::core::{FunctionCallData, LanguageModelUsage, ProviderResponse, ResponseContent};
 
-    let output_content = res.output.first().ok_or_else(|| LlmError::Provider {
-        message: "No output in response".to_string(),
-        source: None,
-    })?;
+    let mut function_calls = Vec::new();
+    let mut text_parts = Vec::new();
+    let mut refusal = None;
 
-    let content = match output_content {
-        OutputContent::OutputMessage(message) => {
-            let msg_content = message.content.first().ok_or_else(|| LlmError::Provider {
-                message: "No content in message".to_string(),
-                source: None,
-            })?;
-
-            match msg_content {
-                MessageContent::OutputText(output) => ResponseContent::Text(output.text.clone()),
-                MessageContent::Refusal(refusal) => {
-                    ResponseContent::Refusal(refusal.refusal.clone())
+    for output in &res.output {
+        match output {
+            OutputContent::OutputMessage(message) => {
+                for content in &message.content {
+                    match content {
+                        MessageContent::OutputText(text) => text_parts.push(text.text.clone()),
+                        MessageContent::Refusal(r) => refusal = Some(r.refusal.clone()),
+                    }
                 }
             }
-        }
-        OutputContent::FunctionCall(fc) => {
-            // Collect all function calls from the output
-            let function_calls: Vec<FunctionCallData> = res
-                .output
-                .iter()
-                .filter_map(|o| match o {
-                    OutputContent::FunctionCall(fc) => Some(FunctionCallData {
-                        id: fc.call_id.clone(),
-                        name: fc.name.clone(),
-                        arguments: fc.arguments.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect();
-
-            if function_calls.is_empty() {
-                // This shouldn't happen since we matched FunctionCall, but handle it
-                ResponseContent::FunctionCalls(vec![FunctionCallData {
+            OutputContent::FunctionCall(fc) => {
+                function_calls.push(FunctionCallData {
                     id: fc.call_id.clone(),
                     name: fc.name.clone(),
                     arguments: fc.arguments.clone(),
-                }])
-            } else {
-                ResponseContent::FunctionCalls(function_calls)
+                });
             }
         }
+    }
+
+    let content = if !function_calls.is_empty() {
+        ResponseContent::FunctionCalls(function_calls)
+    } else if let Some(refusal) = refusal {
+        ResponseContent::Refusal(refusal)
+    } else if !text_parts.is_empty() {
+        ResponseContent::Text(text_parts.join(""))
+    } else {
+        return Err(LlmError::Provider {
+            message: "No output in response".to_string(),
+            source: None,
+        });
     };
 
     Ok(ProviderResponse {
@@ -615,6 +690,10 @@ mod tests {
             &self.base_url
         }
 
+        fn base_url_security(&self) -> BaseUrlSecurity {
+            BaseUrlSecurity::AllowInsecureHttp
+        }
+
         fn endpoint(&self) -> &str {
             "/responses"
         }
@@ -651,12 +730,33 @@ mod tests {
             tool_choice: None,
             instructions: None,
             max_output_tokens: None,
-            max_tool_calls: None,
             store: None,
             top_logprobs: None,
             top_p: None,
             truncation: None,
             user: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_function_arguments_error_does_not_include_raw_arguments() {
+        let client = ResponsesClient::new(TestProviderConfig::new("http://localhost".to_string()))
+            .expect("client");
+        let raw_arguments = "{\"secret\":\"do-not-log\"";
+        let result =
+            client.parse_function_arguments(&serde_json::Value::String(raw_arguments.to_string()));
+
+        match result {
+            Err(LlmError::Parse { message, source }) => {
+                assert_eq!(message, "Failed to parse tool arguments");
+                assert!(!message.contains(raw_arguments));
+                assert!(source.is::<serde_json::Error>());
+                assert!(!source.to_string().contains(raw_arguments));
+
+                let display = LlmError::Parse { message, source }.to_string();
+                assert!(!display.contains(raw_arguments));
+            }
+            other => panic!("Expected Parse Error, got {other:?}"),
         }
     }
 
@@ -880,6 +980,39 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "wrapped_success");
+    }
+
+    #[tokio::test]
+    async fn test_response_parsing_rejects_unknown_fields() {
+        let server = MockServer::start().await;
+
+        let output_json = serde_json::json!({
+            "value": "ok",
+            "extra": true
+        });
+
+        let response = serde_json::json!({
+            "id": "resp_extra_field",
+            "model": "test-model",
+            "output": [{
+                "id": "msg_extra_field",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": output_json.to_string()
+                }]
+            }],
+            "usage": { "input_tokens": 0, "output_tokens": 0, "total_tokens": 0 }
+        });
+
+        let result = run_parsing_test::<TestResponse>(&server, response).await;
+
+        match result {
+            Err(LlmError::Parse { .. }) => (),
+            _ => panic!("Expected Parse Error, got {:?}", result),
+        }
     }
 
     #[tokio::test]

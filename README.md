@@ -81,7 +81,7 @@ See `examples/` for more runnable examples.
 
 ## Known Issues
 
-- ..
+- **TODO**: Evaluate whether `ToolCallingConfig` should be required rather than optional. Currently providers default to a guard with sensible limits when no config is set, but allowing `None` suggests users can opt out of loop protection entirely. We may want to be opinionated here and always require a `ToolCallingConfig`.
 
 ## License
 

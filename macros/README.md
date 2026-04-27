@@ -64,7 +64,7 @@ Transforms Rust functions into AI-callable tools with automatic JSON schema gene
 - **Parameter Validation**: Ensures all docstring parameters exist in the function signature
 - **Optional Parameters**: Automatically detects `Option<T>` types and marks them as non-required
 - **Type Mapping**: Converts Rust types to JSON schema types
-- **Async Support**: Handles both sync and async functions
+- **Async Support**: Handles both sync and async functions; generated sync tools are offloaded to Tokio's blocking pool when run through `ToolRegistry`
 - **Error Handling**: Maps errors to `LlmError` with proper context
 
 #### Syntax

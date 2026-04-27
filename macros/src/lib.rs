@@ -37,6 +37,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 
+mod common;
 mod tool;
 mod tools;
 
@@ -49,7 +50,8 @@ mod tools;
 /// # What it does
 ///
 /// - Adds `#[derive(serde::Deserialize, schemars::JsonSchema)]`
-/// - Adds `#[schemars(deny_unknown_fields)]` for strict field validation
+/// - Adds `#[serde(deny_unknown_fields)]` for strict local deserialization
+/// - Adds `#[schemars(deny_unknown_fields)]` for strict schema generation
 /// - Enables automatic JSON schema generation for LLM providers
 ///
 /// # Example
@@ -73,9 +75,9 @@ mod tools;
 ///
 /// # Field Validation
 ///
-/// The `deny_unknown_fields` attribute ensures that responses must exactly match
-/// your struct definition. Any extra fields will cause a deserialization error,
-/// providing predictable and safe responses.
+/// The `deny_unknown_fields` attributes ensure that responses must exactly match
+/// your struct definition. Any extra fields will cause a local deserialization
+/// error and are also rejected in the generated JSON schema.
 ///
 /// # Supported Types
 ///
@@ -92,6 +94,7 @@ pub fn completion_schema(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[derive(serde::Deserialize, schemars::JsonSchema)]
+        #[serde(deny_unknown_fields)]
         #[schemars(deny_unknown_fields)]
         #item_tokens
     };

@@ -1,6 +1,7 @@
 use rsai::{
-    LlmError, OpenAiConfig, OpenRouterConfig, ToolCall, ToolCallingConfig, ToolChoice, ToolConfig,
-    ToolRegistry, completion_schema, tool, toolset,
+    GeminiClient, LlmError, OpenAiClient, OpenAiConfig, OpenRouterClient, OpenRouterConfig,
+    ToolCall, ToolCallingConfig, ToolChoice, ToolConfig, ToolRegistry, completion_schema, tool,
+    toolset,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -292,19 +293,85 @@ fn provider_configs_share_default_tool_calling_limits() {
     let openrouter_guard = openrouter.get_tool_calling_guard();
     assert_eq!(openai_guard.max_iterations, 50);
     assert_eq!(openai_guard.timeout, Duration::from_secs(300));
+    assert_eq!(openai_guard.max_tool_calls_per_turn, 8);
+    assert_eq!(openai_guard.max_concurrent_tool_calls, 4);
+    assert_eq!(openai_guard.tool_timeout, Duration::from_secs(30));
     assert_eq!(openai_guard.max_iterations, openrouter_guard.max_iterations);
     assert_eq!(openai_guard.timeout, openrouter_guard.timeout);
+    assert_eq!(
+        openai_guard.max_tool_calls_per_turn,
+        openrouter_guard.max_tool_calls_per_turn
+    );
+    assert_eq!(
+        openai_guard.max_concurrent_tool_calls,
+        openrouter_guard.max_concurrent_tool_calls
+    );
+    assert_eq!(openai_guard.tool_timeout, openrouter_guard.tool_timeout);
 
-    let custom_config = ToolCallingConfig::new(10, Duration::from_secs(60));
+    let custom_config = ToolCallingConfig::new(10, Duration::from_secs(60))
+        .with_max_tool_calls_per_turn(5)
+        .with_max_concurrent_tool_calls(2)
+        .with_tool_timeout(Duration::from_secs(20));
     let custom_guard = openai
         .with_tool_calling_config(custom_config.clone())
         .get_tool_calling_guard();
     assert_eq!(custom_guard.max_iterations, 10);
     assert_eq!(custom_guard.timeout, Duration::from_secs(60));
+    assert_eq!(custom_guard.max_tool_calls_per_turn, 5);
+    assert_eq!(custom_guard.max_concurrent_tool_calls, 2);
+    assert_eq!(custom_guard.tool_timeout, Duration::from_secs(20));
 
     let custom_router_guard = openrouter
         .with_tool_calling_config(custom_config)
         .get_tool_calling_guard();
     assert_eq!(custom_router_guard.max_iterations, 10);
     assert_eq!(custom_router_guard.timeout, Duration::from_secs(60));
+    assert_eq!(custom_router_guard.max_tool_calls_per_turn, 5);
+    assert_eq!(custom_router_guard.max_concurrent_tool_calls, 2);
+    assert_eq!(custom_router_guard.tool_timeout, Duration::from_secs(20));
+}
+
+#[test]
+fn provider_clients_reject_http_base_urls_by_default() {
+    assert_insecure_base_url_error(
+        OpenAiClient::new("test-key".to_string())
+            .expect("default OpenAI client")
+            .with_base_url("http://localhost:8080/v1".to_string()),
+    );
+    assert_insecure_base_url_error(
+        OpenRouterClient::new("test-key".to_string())
+            .expect("default OpenRouter client")
+            .with_base_url("http://localhost:8080/api/v1".to_string()),
+    );
+    assert_insecure_base_url_error(
+        GeminiClient::new("test-key".to_string())
+            .expect("default Gemini client")
+            .with_base_url("http://localhost:8080/v1beta".to_string()),
+    );
+}
+
+#[test]
+fn provider_clients_allow_http_base_urls_with_explicit_opt_out() {
+    OpenAiClient::new("test-key".to_string())
+        .expect("default OpenAI client")
+        .with_insecure_base_url("http://localhost:8080/v1".to_string())
+        .expect("explicit OpenAI HTTP opt-out");
+    OpenRouterClient::new("test-key".to_string())
+        .expect("default OpenRouter client")
+        .with_insecure_base_url("http://localhost:8080/api/v1".to_string())
+        .expect("explicit OpenRouter HTTP opt-out");
+    GeminiClient::new("test-key".to_string())
+        .expect("default Gemini client")
+        .with_insecure_base_url("http://localhost:8080/v1beta".to_string())
+        .expect("explicit Gemini HTTP opt-out");
+}
+
+fn assert_insecure_base_url_error<T>(result: Result<T, LlmError>) {
+    match result {
+        Err(LlmError::ProviderConfiguration(message)) => {
+            assert!(message.contains("Insecure provider base URL rejected"));
+        }
+        Err(other) => panic!("expected insecure base URL configuration error, got {other:?}"),
+        Ok(_) => panic!("expected insecure base URL configuration error"),
+    }
 }

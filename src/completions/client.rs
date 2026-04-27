@@ -2,12 +2,15 @@
 //!
 //! This module provides reusable infrastructure for completion-style APIs.
 
+use futures::{StreamExt, TryStreamExt, stream};
 use serde::{Serialize, de::DeserializeOwned};
 
+pub use crate::core::BaseUrlSecurity;
 use crate::{
     core::{
         FunctionCallData, HttpClient, HttpClientConfig, InspectorConfig, LlmError,
         ProviderResponse, StructuredRequest, ToolCall, ToolCallingGuard, ToolRegistry,
+        http::validate_provider_base_url,
     },
     responses::Format,
 };
@@ -64,6 +67,11 @@ pub trait CompletionProviderConfig {
     /// Get the base URL for the API
     fn base_url(&self) -> &str;
 
+    /// Security policy for custom provider base URLs.
+    fn base_url_security(&self) -> BaseUrlSecurity {
+        BaseUrlSecurity::HttpsOnly
+    }
+
     /// Get the authentication header as (name, value) tuple
     fn auth_header(&self) -> (String, String);
 
@@ -97,6 +105,8 @@ pub struct CompletionClient<P: CompletionProviderConfig> {
 impl<P: CompletionProviderConfig> CompletionClient<P> {
     /// Create a new completion client with the given configuration.
     pub fn new(config: P) -> Result<Self, LlmError> {
+        validate_provider_base_url(config.base_url(), config.base_url_security())?;
+
         let http_config = config.http_config();
         let user_agent = config.user_agent();
         let inspector_config = config.inspector_config().cloned();
@@ -187,34 +197,44 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
 
             if let Some(calls) = function_calls.filter(|c| !c.is_empty()) {
                 tracing::info!(count = calls.len(), "Model requested tool execution");
+                guard.check_tool_calls_for_turn(calls.len())?;
 
+                let mut tool_calls = Vec::with_capacity(calls.len());
                 for call in &calls {
-                    // Add function call to conversation
                     conversation.push(ConversationItem::FunctionCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     });
 
-                    // Execute the tool
-                    let tool_call = ToolCall {
+                    tool_calls.push(ToolCall {
                         id: call.id.clone(),
                         call_id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
-                    };
-                    let result = tool_registry.execute(&tool_call).await?;
-
-                    // Add result to conversation
-                    conversation.push(ConversationItem::FunctionResult {
-                        call_id: call.id.clone(),
-                        result: result.clone(),
                     });
+                }
 
-                    // If not parallel, process one at a time
-                    if !is_parallel {
-                        break;
-                    }
+                let max_concurrent_tool_calls = if is_parallel {
+                    guard.max_concurrent_tool_calls()
+                } else {
+                    1
+                };
+                let tool_timeout = guard.tool_timeout;
+                let results: Vec<serde_json::Value> = stream::iter(tool_calls.iter().cloned())
+                    .map(|tool_call| async move {
+                        self.execute_tool_with_timeout(tool_registry, &tool_call, tool_timeout)
+                            .await
+                    })
+                    .buffered(max_concurrent_tool_calls)
+                    .try_collect()
+                    .await?;
+
+                for (tool_call, result) in tool_calls.iter().zip(results) {
+                    conversation.push(ConversationItem::FunctionResult {
+                        call_id: tool_call.call_id.clone(),
+                        result,
+                    });
                 }
             } else {
                 tracing::debug!("No more tool calls, returning final response");
@@ -222,10 +242,28 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
             }
         }
     }
+
+    async fn execute_tool_with_timeout<Ctx>(
+        &self,
+        tool_registry: &ToolRegistry<Ctx>,
+        tool_call: &ToolCall,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, LlmError>
+    where
+        Ctx: Send + Sync + 'static,
+    {
+        match tokio::time::timeout(timeout, tool_registry.execute(tool_call)).await {
+            Ok(result) => result,
+            Err(_) => Err(LlmError::ToolExecutionTimeout {
+                tool_name: tool_call.name.clone(),
+                timeout,
+            }),
+        }
+    }
 }
 
 /// Convert core messages to conversation items.
-fn convert_messages_to_conversation(
+pub(crate) fn convert_messages_to_conversation(
     messages: &[crate::core::ConversationMessage],
 ) -> Result<Vec<ConversationItem>, LlmError> {
     messages
