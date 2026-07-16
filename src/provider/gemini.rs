@@ -392,14 +392,17 @@ fn build_contents_from_conversation(
         pending_role: &mut Option<String>,
         pending_parts: &mut Vec<Part>,
     ) {
-        if let Some(role) = pending_role.take() {
-            if !pending_parts.is_empty() {
-                contents.push(Content {
-                    role: Some(role),
-                    parts: std::mem::take(pending_parts),
-                });
-            }
+        let Some(role) = pending_role.take() else {
+            return;
+        };
+        if pending_parts.is_empty() {
+            return;
         }
+
+        contents.push(Content {
+            role: Some(role),
+            parts: std::mem::take(pending_parts),
+        });
     }
 
     fn push_grouped_function_part(

@@ -16,6 +16,8 @@ This library offers an **opinionated feature set**, rather than trying to be a g
 
 ## Quick Start
 
+Requires Rust 1.97 or newer.
+
 ```rust
 use rsai::{llm, Message, ChatRole, ApiKey, Provider, completion_schema};
 

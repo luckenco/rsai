@@ -3,7 +3,7 @@ name = "rsai-macros"
 version = "0.4.0"
 authors = ["Constantin Luckenbach <cluckenbach@protonmail.com>"]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.97"
 description = "Macros for the rsai crate providing structured AI generation capabilities"
 homepage = "https://rsai.dev"
 repository = "https://github.com/caluckenbach/rsai"
@@ -15,15 +15,15 @@ categories = ["api-bindings", "development-tools::procedural-macro-helpers"]
 proc-macro = true
 
 [dependencies]
-proc-macro2 = "1.0"
-quote = "1.0"
-syn = { version = "2.0", features = ["full", "extra-traits"] }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 
 [dev-dependencies]
-trybuild = "1.0"
+trybuild = "1.0.118"
 rsai = { path = ".." }
-tokio = { version = "1.0", features = ["macros", "rt"] }
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
