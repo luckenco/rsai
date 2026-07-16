@@ -22,17 +22,22 @@ use async_trait::async_trait;
 
 /// OpenAI-specific configuration for the responses client
 pub struct OpenAiConfig {
+    /// API key sent in the authorization header.
     pub api_key: String,
+    /// Base URL for Responses API requests.
     pub base_url: String,
+    /// Security policy applied to the base URL.
     pub base_url_security: BaseUrlSecurity,
     /// Configuration for tool calling limits
     pub tool_calling_config: Option<ToolCallingConfig>,
+    /// HTTP timeout and retry settings.
     pub http_config: HttpClientConfig,
     /// Configuration for request/response inspection
     pub inspector_config: Option<InspectorConfig>,
 }
 
 impl OpenAiConfig {
+    /// Create a configuration using OpenAI's default base URL.
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
@@ -44,6 +49,7 @@ impl OpenAiConfig {
         }
     }
 
+    /// Set raw request and response inspection callbacks.
     pub fn with_inspector_config(mut self, config: InspectorConfig) -> Self {
         self.inspector_config = Some(config);
         self
@@ -74,16 +80,19 @@ impl OpenAiConfig {
         self
     }
 
+    /// Set limits and timeouts for automatic tool calling.
     pub fn with_tool_calling_config(mut self, config: ToolCallingConfig) -> Self {
         self.tool_calling_config = Some(config);
         self
     }
 
+    /// Set HTTP timeout and retry behavior.
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Self {
         self.http_config = config;
         self
     }
 
+    /// Create a fresh guard from the configured tool-calling limits.
     pub fn get_tool_calling_guard(&self) -> ToolCallingGuard {
         match self.tool_calling_config {
             Some(ref config) => ToolCallingGuard::from_config(config),
@@ -132,11 +141,17 @@ impl OpenAiConfig {
     }
 }
 
+/// Client for OpenAI's Responses API.
 pub struct OpenAiClient {
     responses_client: ResponsesClient<OpenAiConfig>,
 }
 
 impl OpenAiClient {
+    /// Create a client using OpenAI's default base URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(api_key: String) -> Result<Self, LlmError> {
         let config = OpenAiConfig::new(api_key);
         Ok(Self {
@@ -172,6 +187,11 @@ impl OpenAiClient {
         Ok(self)
     }
 
+    /// Set limits and timeouts for automatic tool calling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated HTTP client cannot be constructed.
     pub fn with_tool_calling_config(mut self, config: ToolCallingConfig) -> Result<Self, LlmError> {
         let config = self
             .responses_client
@@ -181,6 +201,11 @@ impl OpenAiClient {
         Ok(self)
     }
 
+    /// Set HTTP timeout and retry behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated HTTP client cannot be constructed.
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Result<Self, LlmError> {
         let config = self.responses_client.into_config().with_http_config(config);
         self.responses_client = ResponsesClient::new(config)?;
@@ -200,6 +225,7 @@ impl LlmProvider for OpenAiClient {
         T: crate::CompletionTarget + Send,
         Ctx: Send + Sync + 'static,
     {
+        request.validate()?;
         let guard = self.responses_client.config.get_tool_calling_guard();
         self.responses_client
             .generate_completion::<T, Ctx>(request, format, tool_registry, guard)

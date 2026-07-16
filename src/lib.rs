@@ -51,6 +51,8 @@
 //! }
 //! ```
 //!
+#![warn(missing_docs)]
+
 mod completions;
 mod core;
 mod provider;
@@ -78,10 +80,15 @@ pub use core::BoxFuture;
 
 // Error handling
 pub use core::LlmError;
+/// Result type used by rsai APIs.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use schemars;
+    pub use serde;
+    pub use serde_json;
+
     pub async fn spawn_blocking_tool<F>(f: F) -> crate::Result<serde_json::Value>
     where
         F: FnOnce() -> crate::Result<serde_json::Value> + Send + 'static,

@@ -25,7 +25,9 @@ pub enum BaseUrlSecurity {
 /// Configuration for HTTP client resilience
 #[derive(Debug, Clone)]
 pub struct HttpClientConfig {
+    /// Timeout applied to each HTTP request.
     pub timeout: Duration,
+    /// Maximum number of retries after the initial request.
     pub max_retries: u32,
     /// Base duration for exponential backoff
     pub initial_retry_delay: Duration,

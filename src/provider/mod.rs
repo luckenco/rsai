@@ -8,9 +8,13 @@ pub use openai::{OpenAiClient, OpenAiConfig};
 pub use openrouter::{OpenRouterClient, OpenRouterConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Model provider used for a completion request.
 pub enum Provider {
+    /// OpenAI Responses API.
     OpenAI,
+    /// OpenRouter Responses API.
     OpenRouter,
+    /// Google Gemini generate-content API.
     Gemini,
 }
 

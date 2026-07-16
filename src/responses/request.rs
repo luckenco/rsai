@@ -193,7 +193,9 @@ fn create_serializable_tool(tool: &Tool) -> SerializableTool {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// Provider-independent response format declaration.
 pub struct Format {
+    /// Text or JSON Schema response mode.
     pub format: FormatType,
 }
 

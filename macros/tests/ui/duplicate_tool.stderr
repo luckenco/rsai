@@ -1,0 +1,5 @@
+error: tool 'echo' is listed more than once
+  --> tests/ui/duplicate_tool.rs:11:33
+   |
+11 |     let _tools = toolset![echo, echo];
+   |                                 ^^^^

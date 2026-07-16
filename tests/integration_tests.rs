@@ -245,7 +245,7 @@ async fn execution_errors_surface_parameter_validation() {
     let error = toolset.registry.execute(&invalid_call).await.unwrap_err();
     match error {
         LlmError::ToolExecution { message, .. } => {
-            assert!(message.contains("Invalid parameter 'a'"));
+            assert!(message.contains("Invalid parameters for calculate"));
         }
         _ => panic!("Expected ToolExecution error for invalid parameter"),
     }

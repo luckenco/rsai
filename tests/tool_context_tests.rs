@@ -1,7 +1,10 @@
 //! Tests for tool context/dependency injection feature.
 
-use rsai::{Ctx, ToolCall, ToolSet, ToolSetBuilder, tool, toolset};
-use std::sync::atomic::{AtomicU32, Ordering};
+use rsai::{Ctx, LlmError, ToolCall, ToolSet, ToolSetBuilder, tool, toolset};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 
 // Mock resources that tools might need
 struct DatabasePool {
@@ -93,8 +96,9 @@ async fn test_context_tool_execution() {
         cache: CacheClient::new(),
     };
 
-    let toolset: ToolSet<AppContext> =
-        toolset![AppContext => search_docs, add_numbers].with_context(context);
+    let toolset: ToolSet<AppContext> = toolset![AppContext => search_docs, add_numbers]
+        .with_context(context)
+        .expect("toolset");
 
     // Execute the search_docs tool
     let tool_call = ToolCall {
@@ -124,7 +128,9 @@ async fn test_context_is_shared_across_calls() {
 
     let db_initial_count = context.db.get_query_count();
 
-    let toolset: ToolSet<AppContext> = toolset![AppContext => search_docs].with_context(context);
+    let toolset: ToolSet<AppContext> = toolset![AppContext => search_docs]
+        .with_context(context)
+        .expect("toolset");
 
     // Execute the search_docs tool multiple times
     for i in 0..3 {
@@ -155,8 +161,9 @@ async fn test_mixed_tools_with_and_without_context() {
         cache: CacheClient::new(),
     };
 
-    let toolset: ToolSet<AppContext> =
-        toolset![AppContext => search_docs, add_numbers].with_context(context);
+    let toolset: ToolSet<AppContext> = toolset![AppContext => search_docs, add_numbers]
+        .with_context(context)
+        .expect("toolset");
 
     // Execute context-aware tool
     let search_call = ToolCall {
@@ -217,13 +224,30 @@ fn test_toolset_builder_creates_correct_type() {
 }
 
 #[test]
+fn toolset_builder_returns_duplicate_tool_error() {
+    let context = AppContext {
+        db: DatabasePool::new(),
+        cache: CacheClient::new(),
+    };
+    let builder = ToolSetBuilder::new()
+        .add_tool(Arc::new(SearchDocsTool))
+        .add_tool(Arc::new(SearchDocsTool));
+
+    let result = builder.with_context(context);
+
+    assert!(matches!(result, Err(LlmError::ToolRegistration { .. })));
+}
+
+#[test]
 fn test_tool_schemas_exclude_context_parameter() {
     let context = AppContext {
         db: DatabasePool::new(),
         cache: CacheClient::new(),
     };
 
-    let toolset: ToolSet<AppContext> = toolset![AppContext => search_docs].with_context(context);
+    let toolset: ToolSet<AppContext> = toolset![AppContext => search_docs]
+        .with_context(context)
+        .expect("toolset");
 
     let schemas = toolset.tools().expect("schemas");
 

@@ -336,8 +336,9 @@ impl<State: private::Completable, Ctx: Send + Sync + 'static> LlmBuilder<State, 
 
     /// Execute the LLM request and return an output defined by `T`.
     ///
-    /// The target type `T` must implement [`CompletionTarget`]. Structured schemas can be created
-    /// with the `#[completion_schema]` macro, while plain text responses can use [`TextResponse`].
+    /// The target type `T` must implement [`crate::CompletionTarget`]. Structured schemas can be
+    /// created with the `#[completion_schema]` macro, while plain text responses can use
+    /// [`crate::TextResponse`].
     ///
     /// # Example
     /// ```no_run
@@ -473,6 +474,7 @@ impl LlmBuilder<private::MessagesSet, ()> {
 }
 
 impl<Ctx: Send + Sync + 'static> LlmBuilder<private::ToolsSet, Ctx> {
+    /// Set how the provider may select from the configured tools.
     pub fn tool_choice(mut self, choice: ToolChoice) -> Self {
         self.fields.tool_choice = Some(choice);
         self

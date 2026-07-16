@@ -25,14 +25,21 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     // Validate that all docstring parameters exist as actual parameters (skip context params)
     validate_parameter_descriptions(&params, &param_descriptions, &input.sig)?;
 
-    // Generate JSON schema for parameters (excludes context params)
-    let schema = generate_parameter_schema(&params)?;
-
     // Generate the wrapper struct name
     let wrapper_name = quote::format_ident!(
         "{}Tool",
         crate::common::to_pascal_case(&fn_name.to_string())
     );
+    let params_name = quote::format_ident!(
+        "__Rsai{}Parameters",
+        crate::common::to_pascal_case(&fn_name.to_string())
+    );
+    let params_struct = generate_parameter_struct(&params_name, &params);
+    let schema = quote! {
+        rsai::__private::serde_json::to_value(
+            rsai::__private::schemars::schema_for!(#params_name)
+        ).expect("generated tool schema must serialize")
+    };
 
     // Check if function is async
     let is_async = input.sig.asyncness.is_some();
@@ -42,6 +49,7 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         fn_name,
         &context_param,
         &params,
+        &params_name,
         is_async,
         ContextAccess::Borrowed,
     )?;
@@ -52,6 +60,7 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             fn_name,
             &context_param,
             &params,
+            &params_name,
             is_async,
             ContextAccess::OwnedArc,
         )?;
@@ -67,8 +76,8 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             fn execute_owned(
                 self: ::std::sync::Arc<Self>,
                 __ctx: ::std::sync::Arc<__Ctx>,
-                params: ::serde_json::Value,
-            ) -> rsai::BoxFuture<'static, Result<::serde_json::Value, rsai::LlmError>>
+                params: rsai::__private::serde_json::Value,
+            ) -> rsai::BoxFuture<'static, Result<rsai::__private::serde_json::Value, rsai::LlmError>>
             where
                 Self: 'static,
                 __Ctx: Send + Sync + 'static,
@@ -115,7 +124,7 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                     #wrapper_name::schema(self)
                 }
 
-                fn execute<'a>(&'a self, __ctx: &'a __Ctx, params: ::serde_json::Value) -> rsai::BoxFuture<'a, Result<::serde_json::Value, rsai::LlmError>> {
+                fn execute<'a>(&'a self, __ctx: &'a __Ctx, params: rsai::__private::serde_json::Value) -> rsai::BoxFuture<'a, Result<rsai::__private::serde_json::Value, rsai::LlmError>> {
                     use rsai::{BoxFuture, LlmError};
                     Box::pin(async move {
                         #execute_impl
@@ -133,7 +142,7 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                     #wrapper_name::schema(self)
                 }
 
-                fn execute<'a>(&'a self, __ctx: &'a __Ctx, params: ::serde_json::Value) -> rsai::BoxFuture<'a, Result<::serde_json::Value, rsai::LlmError>> {
+                fn execute<'a>(&'a self, __ctx: &'a __Ctx, params: rsai::__private::serde_json::Value) -> rsai::BoxFuture<'a, Result<rsai::__private::serde_json::Value, rsai::LlmError>> {
                     use rsai::{BoxFuture, LlmError};
                     let _ = __ctx; // Unused for context-free tools
                     Box::pin(async move {
@@ -149,6 +158,8 @@ pub fn tool_impl(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     // Generate the complete implementation
     let expanded = quote! {
         #input
+
+        #params_struct
 
         #[derive(Clone)]
         pub struct #wrapper_name;
@@ -282,26 +293,20 @@ fn parse_parameters(
 
                 // Check if type is Option<T>
                 let (ty, required) = match &*pat_type.ty {
-                    Type::Path(type_path) => {
-                        let segments = &type_path.path.segments;
-                        if segments.len() == 1 && segments[0].ident == "Option" {
-                            // Extract inner type from Option<T>
-                            if let syn::PathArguments::AngleBracketed(args) = &segments[0].arguments
-                            {
-                                if let Some(syn::GenericArgument::Type(inner_ty)) =
-                                    args.args.first()
-                                {
-                                    (inner_ty.clone(), false)
-                                } else {
-                                    ((*pat_type.ty).clone(), true)
-                                }
-                            } else {
-                                ((*pat_type.ty).clone(), true)
-                            }
-                        } else {
-                            ((*pat_type.ty).clone(), true)
-                        }
-                    }
+                    Type::Path(type_path) => type_path
+                        .path
+                        .segments
+                        .last()
+                        .filter(|segment| segment.ident == "Option")
+                        .and_then(|segment| match &segment.arguments {
+                            syn::PathArguments::AngleBracketed(args) => args.args.first(),
+                            _ => None,
+                        })
+                        .and_then(|argument| match argument {
+                            syn::GenericArgument::Type(inner_ty) => Some(inner_ty.clone()),
+                            _ => None,
+                        })
+                        .map_or(((*pat_type.ty).clone(), true), |inner_ty| (inner_ty, false)),
                     _ => ((*pat_type.ty).clone(), true),
                 };
 
@@ -354,86 +359,49 @@ fn validate_parameter_descriptions(
     Ok(())
 }
 
-fn generate_parameter_schema(params: &[Parameter]) -> Result<TokenStream> {
-    if params.is_empty() {
-        return Ok(quote! {
-            ::serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": false
-            })
-        });
-    }
+fn generate_parameter_struct(params_name: &syn::Ident, params: &[Parameter]) -> TokenStream {
+    let fields = params.iter().map(|param| {
+        let name = quote::format_ident!("{}", param.name);
+        let parameter_type = &param.ty;
+        let description = param.description.as_deref().unwrap_or_default();
+        let owned_type = if is_str_reference(parameter_type) {
+            quote! { ::std::string::String }
+        } else {
+            quote! { #parameter_type }
+        };
+        let ty = if param.required {
+            quote! { #owned_type }
+        } else {
+            quote! { ::std::option::Option<#owned_type> }
+        };
 
-    let properties: Vec<_> = params
-        .iter()
-        .map(|param| {
-            let name = &param.name;
-            let type_str = type_to_json_type(&param.ty).unwrap_or("string");
-
-            if let Some(desc) = &param.description {
-                quote! {
-                    (#name, ::serde_json::json!({
-                        "type": #type_str,
-                        "description": #desc
-                    }))
-                }
-            } else {
-                quote! {
-                    (#name, ::serde_json::json!({
-                        "type": #type_str
-                    }))
-                }
-            }
-        })
-        .collect();
-
-    let required_params: Vec<_> = params
-        .iter()
-        .filter(|p| p.required)
-        .map(|p| &p.name)
-        .collect();
-
-    Ok(quote! {
-        {
-            let mut properties = ::serde_json::Map::new();
-            #(
-                properties.insert(#properties.0.to_string(), #properties.1);
-            )*
-
-            ::serde_json::json!({
-                "type": "object",
-                "properties": properties,
-                "required": [#(#required_params),*],
-                "additionalProperties": false
-            })
+        quote! {
+            #[doc = #description]
+            #name: #ty
         }
-    })
+    });
+
+    quote! {
+        #[derive(
+            rsai::__private::serde::Deserialize,
+            rsai::__private::schemars::JsonSchema
+        )]
+        #[serde(crate = "rsai::__private::serde", deny_unknown_fields)]
+        #[schemars(crate = "rsai::__private::schemars", deny_unknown_fields)]
+        struct #params_name {
+            #(#fields,)*
+        }
+    }
 }
 
-fn type_to_json_type(ty: &Type) -> Result<&'static str> {
-    match ty {
-        Type::Path(type_path) => {
-            let ident = &type_path
-                .path
-                .segments
-                .last()
-                .ok_or_else(|| syn::Error::new_spanned(ty, "empty type path"))?
-                .ident;
-
-            match ident.to_string().as_str() {
-                "String" | "str" => Ok("string"),
-                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
-                | "u128" | "usize" => Ok("integer"),
-                "f32" | "f64" => Ok("number"),
-                "bool" => Ok("boolean"),
-                "Vec" => Ok("array"),
-                _ => Ok("object"), // Default to object for complex types
-            }
-        }
-        _ => Ok("object"),
-    }
+fn is_str_reference(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    let Type::Path(path) = reference.elem.as_ref() else {
+        return false;
+    };
+    path.path.is_ident("str")
 }
 
 #[derive(Clone, Copy)]
@@ -446,40 +414,10 @@ fn generate_execute_impl(
     fn_name: &syn::Ident,
     context_param: &Option<ContextParam>,
     params: &[Parameter],
+    params_name: &syn::Ident,
     is_async: bool,
     context_access: ContextAccess,
 ) -> Result<TokenStream> {
-    let param_extractions = params.iter().map(|param| {
-        let name = &param.name;
-        let name_ident = quote::format_ident!("{}", name);
-        let ty = &param.ty;
-
-        if param.required {
-            quote! {
-                let #name_ident: #ty = params.get(#name)
-                    .ok_or_else(|| LlmError::ToolExecution {
-                        message: format!("Missing required parameter: {}", #name),
-                        source: None,
-                    })
-                    .and_then(|v| ::serde_json::from_value(v.clone())
-                        .map_err(|e| LlmError::ToolExecution {
-                            message: format!("Invalid parameter '{}': {:?}", #name, e),
-                            source: Some(Box::new(e)),
-                        }))?;
-            }
-        } else {
-            quote! {
-                let #name_ident: Option<#ty> = params.get(#name)
-                    .map(|v| ::serde_json::from_value(v.clone()))
-                    .transpose()
-                    .map_err(|e| LlmError::ToolExecution {
-                        message: format!("Invalid parameter '{}': {:?}", #name, e),
-                        source: Some(Box::new(e)),
-                    })?;
-            }
-        }
-    });
-
     // Build the function call arguments
     // If there's a context param, it comes first: fn_name(ctx.as_ref(), param1, param2, ...)
     // Otherwise just: fn_name(param1, param2, ...)
@@ -487,18 +425,33 @@ fn generate_execute_impl(
         .iter()
         .map(|p| quote::format_ident!("{}", p.name))
         .collect();
+    let function_args: Vec<_> = params
+        .iter()
+        .zip(&param_names)
+        .map(|(param, name)| {
+            if is_str_reference(&param.ty) {
+                if param.required {
+                    quote! { #name.as_str() }
+                } else {
+                    quote! { #name.as_deref() }
+                }
+            } else {
+                quote! { #name }
+            }
+        })
+        .collect();
 
     let function_call = if let Some(ctx) = context_param {
         let ctx_name = quote::format_ident!("{}", ctx.name);
         if is_async {
-            quote! { #fn_name(#ctx_name, #(#param_names),*).await }
+            quote! { #fn_name(#ctx_name, #(#function_args),*).await }
         } else {
-            quote! { #fn_name(#ctx_name, #(#param_names),*) }
+            quote! { #fn_name(#ctx_name, #(#function_args),*) }
         }
     } else if is_async {
-        quote! { #fn_name(#(#param_names),*).await }
+        quote! { #fn_name(#(#function_args),*).await }
     } else {
-        quote! { #fn_name(#(#param_names),*) }
+        quote! { #fn_name(#(#function_args),*) }
     };
 
     // Generate context extraction if needed
@@ -518,22 +471,21 @@ fn generate_execute_impl(
     };
 
     Ok(quote! {
-        // Parse parameters from JSON
-        let params = params.as_object()
-            .ok_or_else(|| LlmError::ToolExecution {
-                message: "Parameters must be an object".to_string(),
-                source: None,
+        let #params_name { #(#param_names),* } =
+            rsai::__private::serde_json::from_value(params).map_err(|e| {
+                LlmError::ToolExecution {
+                    message: format!("Invalid parameters for {}: {}", stringify!(#fn_name), e),
+                    source: Some(Box::new(e)),
+                }
             })?;
 
         #context_extraction
-
-        #(#param_extractions)*
 
         // Call the function
         let result = #function_call;
 
         // Convert result to JSON
-        ::serde_json::to_value(result)
+        rsai::__private::serde_json::to_value(result)
             .map_err(|e| LlmError::ToolExecution {
                 message: "Failed to serialize result".to_string(),
                 source: Some(Box::new(e)),

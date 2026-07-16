@@ -22,11 +22,17 @@ use async_trait::async_trait;
 
 /// OpenRouter-specific configuration for the responses client
 pub struct OpenRouterConfig {
+    /// API key sent in the authorization header.
     pub api_key: String,
+    /// Base URL for Responses API requests.
     pub base_url: String,
+    /// Security policy applied to the base URL.
     pub base_url_security: BaseUrlSecurity,
+    /// Optional HTTP-Referer header used for OpenRouter attribution.
     pub http_referer: Option<String>,
+    /// Optional X-Title header used for OpenRouter attribution.
     pub x_title: Option<String>,
+    /// HTTP timeout and retry settings.
     pub http_config: HttpClientConfig,
     /// Configuration for tool calling limits
     pub tool_calling_config: Option<ToolCallingConfig>,
@@ -35,6 +41,7 @@ pub struct OpenRouterConfig {
 }
 
 impl OpenRouterConfig {
+    /// Create a configuration using OpenRouter's default base URL.
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
@@ -74,31 +81,37 @@ impl OpenRouterConfig {
         self
     }
 
+    /// Set HTTP timeout and retry behavior.
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Self {
         self.http_config = config;
         self
     }
 
+    /// Set raw request and response inspection callbacks.
     pub fn with_inspector_config(mut self, config: InspectorConfig) -> Self {
         self.inspector_config = Some(config);
         self
     }
 
+    /// Set the HTTP-Referer attribution header.
     pub fn with_http_referer(mut self, http_referer: String) -> Self {
         self.http_referer = Some(http_referer);
         self
     }
 
+    /// Set the X-Title attribution header.
     pub fn with_x_title(mut self, x_title: String) -> Self {
         self.x_title = Some(x_title);
         self
     }
 
+    /// Set limits and timeouts for automatic tool calling.
     pub fn with_tool_calling_config(mut self, config: ToolCallingConfig) -> Self {
         self.tool_calling_config = Some(config);
         self
     }
 
+    /// Create a fresh guard from the configured tool-calling limits.
     pub fn get_tool_calling_guard(&self) -> ToolCallingGuard {
         if let Some(ref config) = self.tool_calling_config {
             ToolCallingGuard::from_config(config)
@@ -162,11 +175,17 @@ impl OpenRouterConfig {
     }
 }
 
+/// Client for OpenRouter's Responses API.
 pub struct OpenRouterClient {
     responses_client: ResponsesClient<OpenRouterConfig>,
 }
 
 impl OpenRouterClient {
+    /// Create a client using OpenRouter's default base URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(api_key: String) -> Result<Self, LlmError> {
         let config = OpenRouterConfig::new(api_key);
         Ok(Self {
@@ -203,16 +222,23 @@ impl OpenRouterClient {
         Ok(self)
     }
 
+    /// Set the HTTP-Referer attribution header.
     pub fn with_http_referer(mut self, http_referer: String) -> Self {
         self.responses_client.config.http_referer = Some(http_referer);
         self
     }
 
+    /// Set the X-Title attribution header.
     pub fn with_x_title(mut self, x_title: String) -> Self {
         self.responses_client.config.x_title = Some(x_title);
         self
     }
 
+    /// Set limits and timeouts for automatic tool calling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated HTTP client cannot be constructed.
     pub fn with_tool_calling_config(mut self, config: ToolCallingConfig) -> Result<Self, LlmError> {
         let config = self
             .responses_client
@@ -222,6 +248,11 @@ impl OpenRouterClient {
         Ok(self)
     }
 
+    /// Set HTTP timeout and retry behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated HTTP client cannot be constructed.
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Result<Self, LlmError> {
         let config = self.responses_client.into_config().with_http_config(config);
         self.responses_client = ResponsesClient::new(config)?;
@@ -241,6 +272,7 @@ impl LlmProvider for OpenRouterClient {
         T: crate::CompletionTarget + Send,
         Ctx: Send + Sync + 'static,
     {
+        request.validate()?;
         let guard = self.responses_client.config.get_tool_calling_guard();
         self.responses_client
             .generate_completion::<T, Ctx>(request, format, tool_registry, guard)

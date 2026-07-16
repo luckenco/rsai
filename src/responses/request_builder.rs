@@ -73,16 +73,8 @@ pub(crate) fn create_function_tool(tool: &Tool) -> RequestTool {
     let strict = tool.strict.unwrap_or(true);
     let mut parameters = tool.parameters.clone();
 
-    if strict && let Some(properties) = parameters.get("properties").and_then(|p| p.as_object()) {
-        let required = properties
-            .keys()
-            .cloned()
-            .map(serde_json::Value::String)
-            .collect();
-
-        if let Some(parameters) = parameters.as_object_mut() {
-            parameters.insert("required".to_string(), serde_json::Value::Array(required));
-        }
+    if strict {
+        make_strict(&mut parameters);
     }
 
     RequestTool {
@@ -90,6 +82,71 @@ pub(crate) fn create_function_tool(tool: &Tool) -> RequestTool {
         parameters,
         strict: Some(strict),
         description: tool.description.clone(),
+    }
+}
+
+fn make_strict(schema: &mut serde_json::Value) {
+    let serde_json::Value::Object(schema) = schema else {
+        return;
+    };
+
+    schema.remove("$schema");
+
+    let is_number = match schema.get("type") {
+        Some(serde_json::Value::String(value)) => value == "integer" || value == "number",
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .any(|value| value == "integer" || value == "number"),
+        _ => false,
+    };
+    if is_number {
+        schema.remove("format");
+    }
+
+    if let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        let required = properties
+            .keys()
+            .cloned()
+            .map(serde_json::Value::String)
+            .collect();
+        schema.insert("required".to_string(), serde_json::Value::Array(required));
+        schema.insert(
+            "additionalProperties".to_string(),
+            serde_json::Value::Bool(false),
+        );
+    }
+
+    for key in ["properties", "$defs", "definitions"] {
+        if let Some(values) = schema
+            .get_mut(key)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for value in values.values_mut() {
+                make_strict(value);
+            }
+        }
+    }
+
+    if let Some(items) = schema.get_mut("items") {
+        make_strict(items);
+    }
+
+    if let Some(one_of) = schema.remove("oneOf") {
+        schema.insert("anyOf".to_string(), one_of);
+    }
+
+    for key in ["anyOf", "allOf", "prefixItems"] {
+        if let Some(values) = schema
+            .get_mut(key)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for value in values {
+                make_strict(value);
+            }
+        }
     }
 }
 

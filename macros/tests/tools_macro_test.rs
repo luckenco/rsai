@@ -16,6 +16,47 @@ fn calculate_distance(_from: String, _to: String) -> f64 {
     42.5
 }
 
+#[derive(schemars::JsonSchema, serde::Deserialize)]
+struct SearchFilter {
+    exact: bool,
+}
+
+#[derive(schemars::JsonSchema, serde::Deserialize)]
+enum MatchMode {
+    Exact,
+    Prefix,
+}
+
+/// Search records by tags.
+/// tags: Tags that records must contain.
+/// filter: Additional search options.
+#[tool]
+fn search_records(tags: Vec<String>, filter: SearchFilter) -> usize {
+    tags.len() + usize::from(filter.exact)
+}
+
+/// Join borrowed text inputs.
+/// prefix: Required text prefix.
+/// suffix: Optional text suffix.
+#[tool]
+fn join_borrowed(prefix: &str, suffix: Option<&str>) -> String {
+    format!("{prefix}{}", suffix.unwrap_or_default())
+}
+
+/// Check whether a qualified optional value is absent.
+/// value: Optional value.
+#[tool]
+fn qualified_optional(value: std::option::Option<String>) -> bool {
+    value.is_none()
+}
+
+/// Select a matching mode.
+/// mode: Matching behavior.
+#[tool]
+fn select_mode(mode: MatchMode) -> bool {
+    matches!(mode, MatchMode::Exact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +142,98 @@ mod tests {
         let required_array = required.as_array().unwrap();
         assert!(required_array.contains(&json!("_city")));
         assert!(!required_array.contains(&json!("_unit"))); // Optional parameter
+    }
+
+    #[test]
+    fn test_tool_schema_preserves_arrays_and_custom_types() {
+        let schema = SearchRecordsTool.schema();
+        let properties = &schema.parameters["properties"];
+
+        assert_eq!(properties["tags"]["type"], "array");
+        assert_eq!(properties["tags"]["items"]["type"], "string");
+        assert_eq!(properties["filter"]["$ref"], "#/$defs/SearchFilter");
+        assert_eq!(
+            schema.parameters["$defs"]["SearchFilter"]["properties"]["exact"]["type"],
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn test_tool_schema_preserves_custom_enums() {
+        let schema = SelectModeTool.schema();
+        let mode = &schema.parameters["$defs"]["MatchMode"];
+
+        assert_eq!(mode["type"], "string");
+        assert_eq!(mode["enum"], json!(["Exact", "Prefix"]));
+    }
+
+    #[tokio::test]
+    async fn test_qualified_option_accepts_missing_and_null() {
+        let toolset = toolset![qualified_optional];
+        let schema = toolset.tools().expect("tool schema").remove(0);
+        let required = schema
+            .parameters
+            .get("required")
+            .and_then(|value| value.as_array());
+        assert!(required.is_none_or(|required| !required.contains(&json!("value"))));
+
+        for arguments in [json!({}), json!({ "value": null })] {
+            let result = toolset
+                .registry
+                .execute(&ToolCall {
+                    id: "call_optional".to_string(),
+                    call_id: "call_optional".to_string(),
+                    name: "qualified_optional".to_string(),
+                    arguments,
+                })
+                .await
+                .expect("tool execution");
+
+            assert_eq!(result, json!(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_supports_borrowed_str_parameters() {
+        let toolset = toolset![join_borrowed];
+        let schema = toolset.tools().expect("tool schema").remove(0);
+
+        assert_eq!(schema.parameters["properties"]["prefix"]["type"], "string");
+        assert_eq!(
+            schema.parameters["properties"]["suffix"]["type"][0],
+            "string"
+        );
+
+        let result = toolset
+            .registry
+            .execute(&ToolCall {
+                id: "call_1".to_string(),
+                call_id: "call_1".to_string(),
+                name: "join_borrowed".to_string(),
+                arguments: json!({ "prefix": "hello", "suffix": " world" }),
+            })
+            .await
+            .expect("tool execution");
+
+        assert_eq!(result, json!("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_execution_rejects_unknown_parameters() {
+        let toolset = toolset![search_records];
+        let call = ToolCall {
+            id: "call_search".to_string(),
+            call_id: "call_search".to_string(),
+            name: "search_records".to_string(),
+            arguments: json!({
+                "tags": ["rust"],
+                "filter": { "exact": true },
+                "unexpected": true
+            }),
+        };
+
+        let error = toolset.registry.execute(&call).await.unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[tokio::test]

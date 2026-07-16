@@ -87,7 +87,7 @@ fn test_complex_function_docstring_parsing() {
 
     // Check param2 (optional)
     let param2 = &properties["param2"];
-    assert_eq!(param2["type"], "integer");
+    assert_eq!(param2["type"], serde_json::json!(["integer", "null"]));
     assert_eq!(param2["description"], "Second parameter that is optional");
 
     // Check param3

@@ -195,10 +195,12 @@ pub fn completion_schema(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// | Rust Type | JSON Schema Type |
 /// |-----------|------------------|
 /// | `String`, `&str` | `string` |
-/// | `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64` | `number` |
+/// | Integer types | `integer` |
+/// | `f32`, `f64` | `number` |
 /// | `bool` | `boolean` |
 /// | `Vec<T>` | `array` |
-/// | `Option<T>` | `T` (optional) |
+/// | `Option<T>` | optional field containing `T` |
+/// | Types implementing `serde::Deserialize` and `schemars::JsonSchema` | their generated schema |
 #[proc_macro_attribute]
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     match tool::tool_impl(attr.into(), item.into()) {
@@ -292,6 +294,33 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// );
 /// ```
 ///
+/// ## Tools With Shared Context
+///
+/// ```rust
+/// use rsai::{Ctx, ToolSet, tool, toolset};
+///
+/// struct AppContext {
+///     prefix: String,
+/// }
+///
+/// impl AsRef<AppContext> for AppContext {
+///     fn as_ref(&self) -> &AppContext {
+///         self
+///     }
+/// }
+///
+/// #[tool]
+/// /// Greet a user.
+/// /// name: Name to greet.
+/// fn greet(context: Ctx<&AppContext>, name: String) -> String {
+///     format!("{} {name}", context.prefix)
+/// }
+///
+/// let tools: ToolSet<AppContext> = toolset![AppContext => greet]
+///     .with_context(AppContext { prefix: "Hello".to_string() })?;
+/// # Ok::<(), rsai::LlmError>(())
+/// ```
+///
 /// # Generated Code
 ///
 /// The macro generates code that:
@@ -316,7 +345,8 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// If any function name doesn't correspond to a `#[tool]`-annotated function,
 /// compilation will fail with a clear error message indicating which function
-/// is missing the tool annotation.
+/// is missing the tool annotation. Listing the same function twice is also a
+/// compile-time error.
 #[proc_macro]
 pub fn toolset(input: TokenStream) -> TokenStream {
     match tools::tools_impl(input.into()) {

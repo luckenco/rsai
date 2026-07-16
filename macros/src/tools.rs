@@ -56,6 +56,15 @@ pub fn tools_impl(input: TokenStream) -> Result<TokenStream> {
         ));
     }
 
+    for (index, tool) in tools_list.tools.iter().enumerate() {
+        if tools_list.tools[..index].contains(tool) {
+            return Err(syn::Error::new(
+                tool.span(),
+                format!("tool '{}' is listed more than once", tool),
+            ));
+        }
+    }
+
     // Use the same naming logic as the #[tool] macro to reference existing wrapper structs
     let wrapper_names: Vec<_> = tools_list
         .tools
@@ -91,7 +100,7 @@ pub fn tools_impl(input: TokenStream) -> Result<TokenStream> {
                 let registry = ToolRegistry::new();
                 #(
                     registry.register(std::sync::Arc::new(#wrapper_names))
-                    .expect(&format!("Failed to register tool: {}", stringify!(#wrapper_names)));
+                    .expect("toolset! guarantees unique tool names");
                 )*
 
                 ToolSet {

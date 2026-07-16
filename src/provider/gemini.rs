@@ -112,7 +112,7 @@ pub struct GeminiGenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_schema: Option<Value>,
+    pub response_json_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,7 +126,8 @@ pub struct GeminiFunctionDeclaration {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub parameters: Value,
+    #[serde(rename = "parametersJsonSchema")]
+    pub parameters_json_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,17 +187,24 @@ pub struct UsageMetadata {
 // Gemini Configuration
 // ============================================================================
 
+/// Gemini-specific configuration for generate-content requests.
 pub struct GeminiConfig {
+    /// API key sent in the x-goog-api-key header.
     pub api_key: String,
+    /// Base URL for generate-content requests.
     pub base_url: String,
+    /// Security policy applied to the base URL.
     pub base_url_security: BaseUrlSecurity,
+    /// Limits and timeouts for automatic tool calling.
     pub tool_calling_config: Option<ToolCallingConfig>,
+    /// HTTP timeout and retry settings.
     pub http_config: HttpClientConfig,
     /// Configuration for request/response inspection
     pub inspector_config: Option<InspectorConfig>,
 }
 
 impl GeminiConfig {
+    /// Create a configuration using Gemini's default base URL.
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
@@ -234,21 +242,25 @@ impl GeminiConfig {
         self
     }
 
+    /// Set limits and timeouts for automatic tool calling.
     pub fn with_tool_calling_config(mut self, config: ToolCallingConfig) -> Self {
         self.tool_calling_config = Some(config);
         self
     }
 
+    /// Set HTTP timeout and retry behavior.
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Self {
         self.http_config = config;
         self
     }
 
+    /// Set raw request and response inspection callbacks.
     pub fn with_inspector_config(mut self, config: InspectorConfig) -> Self {
         self.inspector_config = Some(config);
         self
     }
 
+    /// Create a fresh guard from the configured tool-calling limits.
     pub fn get_tool_calling_guard(&self) -> ToolCallingGuard {
         if let Some(ref config) = self.tool_calling_config {
             ToolCallingGuard::from_config(config)
@@ -425,10 +437,11 @@ fn build_contents_from_conversation(
                 flush_pending_function_parts(&mut contents, &mut pending_role, &mut pending_parts);
 
                 if role == "system" {
-                    system_instruction = Some(Content {
+                    let instruction = system_instruction.get_or_insert_with(|| Content {
                         role: None,
-                        parts: vec![Part::text(content.clone())],
+                        parts: Vec::new(),
                     });
+                    instruction.parts.push(Part::text(content.clone()));
                 } else {
                     let gemini_role = match role.as_str() {
                         "user" => "user",
@@ -494,63 +507,16 @@ fn find_function_name_by_call_id(
     None
 }
 
-/// Convert standard JSON Schema to Gemini's schema format.
-///
-/// Gemini uses a simplified schema with uppercase type names and fewer fields.
-/// If multiple providers adopt this format in the future, this should become
-/// the default schema format, with OpenAI doing its own conversion.
-fn convert_to_gemini_schema(schema: &Value) -> Value {
-    match schema {
-        Value::Object(obj) => {
-            let mut result = serde_json::Map::new();
-
-            for (key, value) in obj {
-                match key.as_str() {
-                    // Skip unsupported fields
-                    "$schema" | "additionalProperties" | "title" => continue,
-                    // Convert type to uppercase
-                    "type" => {
-                        if let Value::String(t) = value {
-                            result.insert("type".to_string(), Value::String(t.to_uppercase()));
-                        }
-                    }
-                    // Recurse into nested schemas
-                    "properties" => {
-                        if let Value::Object(props) = value {
-                            let converted: serde_json::Map<String, Value> = props
-                                .iter()
-                                .map(|(k, v)| (k.clone(), convert_to_gemini_schema(v)))
-                                .collect();
-                            result.insert("properties".to_string(), Value::Object(converted));
-                        }
-                    }
-                    "items" => {
-                        result.insert("items".to_string(), convert_to_gemini_schema(value));
-                    }
-                    // Pass through supported fields
-                    "required" | "enum" | "description" => {
-                        result.insert(key.clone(), value.clone());
-                    }
-                    _ => {}
-                }
-            }
-
-            Value::Object(result)
-        }
-        other => other.clone(),
-    }
-}
-
 fn build_generation_config(
     request: &StructuredRequest,
     format: &Format,
 ) -> Option<GeminiGenerationConfig> {
     let gen_config = request.generation_config.as_ref();
 
-    let (response_mime_type, response_schema) = match &format.format {
+    let (response_mime_type, response_json_schema) = match &format.format {
         FormatType::JsonSchema(json_schema) => (
             Some("application/json".to_string()),
-            Some(convert_to_gemini_schema(&json_schema.schema)),
+            Some(json_schema.schema.clone()),
         ),
         FormatType::Text { .. } => (None, None),
     };
@@ -566,7 +532,7 @@ fn build_generation_config(
         top_k: None,
         max_output_tokens: gen_config.and_then(|c| c.max_tokens),
         response_mime_type,
-        response_schema,
+        response_json_schema,
     })
 }
 
@@ -589,7 +555,7 @@ fn build_tools_config(
         .map(|t| GeminiFunctionDeclaration {
             name: t.name.clone(),
             description: t.description.clone(),
-            parameters: convert_to_gemini_schema(&t.parameters),
+            parameters_json_schema: t.parameters.clone(),
         })
         .collect();
 
@@ -677,11 +643,17 @@ fn parse_parts_to_content(parts: &[Part]) -> Result<ResponseContent, LlmError> {
 // Gemini Client
 // ============================================================================
 
+/// Client for Google's Gemini generate-content API.
 pub struct GeminiClient {
     completion_client: CompletionClient<GeminiConfig>,
 }
 
 impl GeminiClient {
+    /// Create a client using Gemini's default base URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(api_key: String) -> Result<Self, LlmError> {
         let config = GeminiConfig::new(api_key);
         Ok(Self {
@@ -718,6 +690,11 @@ impl GeminiClient {
         Ok(self)
     }
 
+    /// Set limits and timeouts for automatic tool calling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated HTTP client cannot be constructed.
     pub fn with_tool_calling_config(
         mut self,
         tool_config: ToolCallingConfig,
@@ -730,6 +707,11 @@ impl GeminiClient {
         Ok(self)
     }
 
+    /// Set HTTP timeout and retry behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated HTTP client cannot be constructed.
     pub fn with_http_config(mut self, http_config: HttpClientConfig) -> Result<Self, LlmError> {
         let config = self
             .completion_client
@@ -739,6 +721,11 @@ impl GeminiClient {
         Ok(self)
     }
 
+    /// Set raw request and response inspection callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated HTTP client cannot be constructed.
     pub fn with_inspector_config(
         mut self,
         inspector_config: InspectorConfig,
@@ -764,6 +751,7 @@ impl LlmProvider for GeminiClient {
         T: crate::CompletionTarget + Send,
         Ctx: Send + Sync + 'static,
     {
+        request.validate()?;
         let builder = GeminiRequestBuilder;
 
         // If tools are present and we have a registry, handle automatic tool calling
@@ -830,4 +818,122 @@ pub fn create_gemini_client_from_builder<State, Ctx>(
     Ok(GeminiClient {
         completion_client: CompletionClient::new(config)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::core::{Tool as CoreTool, ToolConfig};
+    use crate::responses::{JsonSchema, JsonSchemaType};
+
+    fn request(tool_config: Option<ToolConfig>) -> StructuredRequest {
+        StructuredRequest {
+            model: "test-model".to_string(),
+            messages: Vec::new(),
+            tool_config,
+            generation_config: None,
+        }
+    }
+
+    fn schema() -> Value {
+        json!({
+            "$defs": {
+                "Address": {
+                    "type": "object",
+                    "properties": { "city": { "type": "string", "minLength": 1 } },
+                    "required": ["city"]
+                }
+            },
+            "type": "object",
+            "properties": {
+                "address": { "$ref": "#/$defs/Address" },
+                "label": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+            },
+            "required": ["address"]
+        })
+    }
+
+    #[test]
+    fn structured_response_uses_json_schema_without_conversion() {
+        let expected_schema = schema();
+        let format = Format {
+            format: FormatType::JsonSchema(JsonSchema {
+                name: "test".to_string(),
+                schema: expected_schema.clone(),
+                r#type: JsonSchemaType::JsonSchema,
+            }),
+        };
+
+        let config = build_generation_config(&request(None), &format).expect("generation config");
+        let serialized = serde_json::to_value(config).expect("serialize generation config");
+
+        assert_eq!(serialized["responseJsonSchema"], expected_schema);
+        assert!(serialized.get("responseSchema").is_none());
+    }
+
+    #[test]
+    fn tool_parameters_use_json_schema_without_conversion() {
+        let expected_schema = schema();
+        let tool_config = ToolConfig {
+            tools: Some(
+                vec![CoreTool {
+                    name: "lookup".to_string(),
+                    description: Some("Look up an address".to_string()),
+                    parameters: expected_schema.clone(),
+                    strict: Some(true),
+                }]
+                .into_boxed_slice(),
+            ),
+            tool_choice: None,
+            parallel_tool_calls: None,
+        };
+
+        let (tools, _) = build_tools_config(&request(Some(tool_config)));
+        let serialized =
+            serde_json::to_value(tools.expect("Gemini tools")).expect("serialize Gemini tools");
+
+        assert_eq!(
+            serialized[0]["functionDeclarations"][0]["parametersJsonSchema"],
+            expected_schema
+        );
+        assert!(
+            serialized[0]["functionDeclarations"][0]
+                .get("parameters")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn system_messages_are_preserved_in_order() {
+        let conversation = vec![
+            ConversationItem::Message {
+                role: "system".to_string(),
+                content: "Be concise.".to_string(),
+            },
+            ConversationItem::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            },
+            ConversationItem::Message {
+                role: "system".to_string(),
+                content: "Use metric units.".to_string(),
+            },
+        ];
+
+        let (system_instruction, contents) =
+            build_contents_from_conversation(&conversation).expect("Gemini content");
+        let serialized = serde_json::to_value(system_instruction.expect("system instruction"))
+            .expect("serialize system instruction");
+
+        assert_eq!(
+            serialized["parts"],
+            json!([
+                { "text": "Be concise." },
+                { "text": "Use metric units." }
+            ])
+        );
+        assert_eq!(contents.len(), 1);
+    }
 }

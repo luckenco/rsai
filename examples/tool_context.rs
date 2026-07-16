@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create toolset with context type: `ContextType => tools...`
-    let tools = toolset![AppContext => search_docs, add].with_context(ctx);
+    let tools = toolset![AppContext => search_docs, add].with_context(ctx)?;
 
     let response = llm::with(Provider::Gemini)
         .api_key(ApiKey::Default)?

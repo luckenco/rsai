@@ -740,6 +740,57 @@ mod schema_tests {
         assert_eq!(responses_tool.parameters["required"], json!(["city"]));
     }
 
+    #[test]
+    fn test_create_function_tool_normalizes_nested_strict_schemas() {
+        let tool = Tool {
+            name: "search".to_string(),
+            description: None,
+            strict: Some(true),
+            parameters: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$defs": {
+                    "Filter": {
+                        "type": "object",
+                        "properties": {
+                            "exact": { "type": "boolean" },
+                            "limit": { "type": ["integer", "null"], "format": "uint32" },
+                            "mode": {
+                                "oneOf": [
+                                    { "const": "Exact" },
+                                    { "const": "Prefix" }
+                                ]
+                            }
+                        },
+                        "required": ["exact"]
+                    }
+                },
+                "type": "object",
+                "properties": {
+                    "filter": { "$ref": "#/$defs/Filter" }
+                }
+            }),
+        };
+
+        let parameters = create_function_tool(&tool).parameters;
+
+        assert!(parameters.get("$schema").is_none());
+        assert_eq!(parameters["required"], json!(["filter"]));
+        assert_eq!(parameters["additionalProperties"], false);
+        assert_eq!(
+            parameters["$defs"]["Filter"]["required"],
+            json!(["exact", "limit", "mode"])
+        );
+        assert_eq!(parameters["$defs"]["Filter"]["additionalProperties"], false);
+        assert!(
+            parameters["$defs"]["Filter"]["properties"]["limit"]
+                .get("format")
+                .is_none()
+        );
+        let mode = &parameters["$defs"]["Filter"]["properties"]["mode"];
+        assert!(mode.get("oneOf").is_none());
+        assert!(mode.get("anyOf").is_some());
+    }
+
     fn matches_provider_error(err: LlmError, expected: &str) {
         match err {
             LlmError::Provider { message, .. } => {

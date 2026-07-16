@@ -6,7 +6,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -50,62 +49,109 @@ impl<T> From<T> for Ctx<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Role assigned to a chat message.
 pub enum ChatRole {
+    /// Instruction that guides the model for the conversation.
     System,
+    /// Input supplied by the user.
     User,
+    /// Prior output supplied by the assistant.
     Assistant,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// One text message in a conversation.
 pub struct Message {
+    /// Sender role for the message.
     pub role: ChatRole,
+    /// Text content of the message.
     pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A function call requested by a model.
 pub struct ToolCall {
+    /// Provider response item identifier.
     pub id: String,
+    /// Identifier used to pair this call with its result.
     pub call_id: String,
+    /// Registered tool name.
     pub name: String,
+    /// JSON object containing the tool arguments.
     pub arguments: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Result returned for a previous tool call.
 pub struct ToolCallResult {
+    /// Provider response item identifier.
     pub id: String,
+    /// Identifier of the tool call this result answers.
     pub tool_call_id: String,
+    /// JSON value returned by the tool.
     pub content: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Provider-independent conversation history item.
 pub enum ConversationMessage {
+    /// A regular text message.
     Chat(Message),
+    /// A tool call requested by the model.
     ToolCall(ToolCall),
+    /// A result supplied for a prior tool call.
     ToolCallResult(ToolCallResult),
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// JSON Schema declaration for a callable tool.
 pub struct Tool {
+    /// Unique function name exposed to the model.
     pub name: String,
+    /// Optional description of the function's behavior.
     pub description: Option<String>,
+    /// JSON Schema object describing accepted arguments.
     pub parameters: Value,
+    /// Whether providers should enforce the parameter schema strictly.
     pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Strategy used by a provider to select tools.
 pub enum ToolChoice {
+    /// Do not call a tool.
     None,
+    /// Let the model decide whether to call a tool.
     Auto,
+    /// Require the model to call at least one tool.
     Required,
-    Function { name: String },
+    /// Require one named tool.
+    Function {
+        /// Tool name that the provider must call.
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Provider-independent request passed to an [`LlmProvider`](crate::LlmProvider).
 pub struct StructuredRequest {
+    /// Provider model identifier.
     pub model: String,
+    /// Conversation sent to the model.
     pub messages: Vec<ConversationMessage>,
+    /// Optional tool declarations and selection settings.
     pub tool_config: Option<ToolConfig>,
+    /// Optional generation settings.
     pub generation_config: Option<GenerationConfig>,
+}
+
+impl StructuredRequest {
+    pub(crate) fn validate(&self) -> Result<(), LlmError> {
+        if let Some(config) = &self.generation_config {
+            config.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// Configuration for tool calling behavior
@@ -122,41 +168,87 @@ pub struct ToolConfig {
 /// Configuration for text generation parameters
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerationConfig {
-    /// Maximum number of tokens to generate
+    /// Maximum number of tokens to generate. Must be greater than zero.
     pub max_tokens: Option<u32>,
 
-    /// Sampling temperature
+    /// Sampling temperature from 0 through 2.
     pub temperature: Option<f32>,
 
-    /// Nucleus sampling parameter (0.0 to 1.0)
+    /// Nucleus sampling parameter from 0 through 1.
     pub top_p: Option<f32>,
 }
 
+impl GenerationConfig {
+    fn validate(&self) -> Result<(), LlmError> {
+        if self.max_tokens == Some(0) {
+            return Err(LlmError::Builder(
+                "max_tokens must be greater than zero".to_string(),
+            ));
+        }
+
+        match self.temperature {
+            Some(temperature) if !(0.0..=2.0).contains(&temperature) => {
+                return Err(LlmError::Builder(
+                    "temperature must be between 0 and 2".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        match self.top_p {
+            Some(top_p) if !(0.0..=1.0).contains(&top_p) => {
+                return Err(LlmError::Builder(
+                    "top_p must be between 0 and 1".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
+/// Typed structured output together with usage and provider metadata.
 pub struct StructuredResponse<T> {
+    /// Parsed response content.
     pub content: T,
+    /// Token usage reported by the provider.
     pub usage: LanguageModelUsage,
+    /// Provider and response identifiers.
     pub metadata: ResponseMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Plain text output together with usage and provider metadata.
 pub struct TextResponse {
+    /// Generated text.
     pub text: String,
+    /// Token usage reported by the provider.
     pub usage: LanguageModelUsage,
+    /// Provider and response identifiers.
     pub metadata: ResponseMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Token counts reported for one model request.
 pub struct LanguageModelUsage {
+    /// Tokens consumed by the input.
     pub prompt_tokens: i32,
+    /// Tokens generated in the output.
     pub completion_tokens: i32,
+    /// Total input and output tokens.
     pub total_tokens: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Identifiers attached to a model response.
 pub struct ResponseMetadata {
+    /// Provider that produced the response.
     pub provider: Provider,
+    /// Provider model identifier.
     pub model: String,
+    /// Provider response identifier, or an empty string when unavailable.
     pub id: String,
 }
 
@@ -195,6 +287,7 @@ pub struct FunctionCallData {
 
 type ToolMap<Ctx> = Arc<RwLock<HashMap<String, Arc<dyn ToolFunction<Ctx>>>>>;
 
+/// Thread-safe collection of callable tools sharing one context value.
 pub struct ToolRegistry<Ctx = ()> {
     tools: ToolMap<Ctx>,
     context: Arc<Ctx>,
@@ -257,6 +350,11 @@ impl<Ctx: Send + Sync + 'static> ToolRegistry<Ctx> {
         Ok(())
     }
 
+    /// Insert a tool, replacing a tool with the same name if one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::ToolRegistration`] if the registry lock is poisoned.
     pub fn overwrite(&self, tool: Arc<dyn ToolFunction<Ctx>>) -> Result<(), LlmError> {
         let schema = tool.schema();
         let schema_name = schema.name.clone();
@@ -275,6 +373,11 @@ impl<Ctx: Send + Sync + 'static> ToolRegistry<Ctx> {
         Ok(())
     }
 
+    /// Return schemas for all registered tools.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::ToolRegistryAccess`] if the registry lock is poisoned.
     pub fn get_schemas(&self) -> Result<Vec<Tool>, LlmError> {
         let r_tools = self
             .tools
@@ -295,6 +398,12 @@ impl<Ctx: Send + Sync + 'static> ToolRegistry<Ctx> {
         ),
         err
     )]
+    /// Execute a registered tool with this registry's shared context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::ToolNotFound`] for an unknown name, a registry access error if the
+    /// lock is poisoned, or the error returned by the tool.
     pub async fn execute(&self, tool_call: &ToolCall) -> Result<serde_json::Value, LlmError> {
         tracing::trace!("Executing tool");
 
@@ -329,13 +438,21 @@ impl Default for ToolRegistry<()> {
     }
 }
 
+/// Boxed, sendable future used by generated tool implementations.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// A registry ready to attach to an [`LlmBuilder`](crate::LlmBuilder).
 pub struct ToolSet<Ctx = ()> {
+    /// Registry containing the tool implementations and shared context.
     pub registry: ToolRegistry<Ctx>,
 }
 
 impl<Ctx: Send + Sync + 'static> ToolSet<Ctx> {
+    /// Return schemas for all tools in this set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::ToolRegistryAccess`] if the registry lock is poisoned.
     pub fn tools(&self) -> Result<Vec<Tool>, LlmError> {
         self.registry.get_schemas()
     }
@@ -345,31 +462,31 @@ impl<Ctx: Send + Sync + 'static> ToolSet<Ctx> {
 /// Created by the `toolset!` macro when a context type is specified.
 pub struct ToolSetBuilder<Ctx> {
     tools: Vec<Arc<dyn ToolFunction<Ctx>>>,
-    _marker: PhantomData<Ctx>,
 }
 
 impl<Ctx: Send + Sync + 'static> ToolSetBuilder<Ctx> {
+    /// Create an empty context-aware toolset builder.
     pub fn new() -> Self {
-        Self {
-            tools: Vec::new(),
-            _marker: PhantomData,
-        }
+        Self { tools: Vec::new() }
     }
 
+    /// Add a tool implementation to the builder.
     pub fn add_tool(mut self, tool: Arc<dyn ToolFunction<Ctx>>) -> Self {
         self.tools.push(tool);
         self
     }
 
     /// Finalize the toolset with the given context.
-    pub fn with_context(self, context: Ctx) -> ToolSet<Ctx> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::ToolRegistration`] when two tools have the same name.
+    pub fn with_context(self, context: Ctx) -> Result<ToolSet<Ctx>, LlmError> {
         let registry = ToolRegistry::with_context(context);
         for tool in self.tools {
-            registry
-                .register(tool)
-                .expect("Failed to register tool in ToolSetBuilder");
+            registry.register(tool)?;
         }
-        ToolSet { registry }
+        Ok(ToolSet { registry })
     }
 }
 
@@ -480,6 +597,77 @@ mod tests {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[test]
+    fn generation_config_validation_accepts_valid_values() {
+        for config in [
+            GenerationConfig {
+                max_tokens: Some(1),
+                temperature: Some(0.0),
+                top_p: None,
+            },
+            GenerationConfig {
+                max_tokens: None,
+                temperature: Some(2.0),
+                top_p: None,
+            },
+            GenerationConfig {
+                max_tokens: None,
+                temperature: None,
+                top_p: Some(1.0),
+            },
+            GenerationConfig {
+                max_tokens: None,
+                temperature: Some(1.0),
+                top_p: Some(0.5),
+            },
+        ] {
+            config.validate().expect("valid generation config");
+        }
+    }
+
+    #[test]
+    fn generation_config_validation_rejects_invalid_values() {
+        let invalid_configs = [
+            (
+                GenerationConfig {
+                    max_tokens: Some(0),
+                    temperature: None,
+                    top_p: None,
+                },
+                "max_tokens",
+            ),
+            (
+                GenerationConfig {
+                    max_tokens: None,
+                    temperature: Some(f32::NAN),
+                    top_p: None,
+                },
+                "temperature",
+            ),
+            (
+                GenerationConfig {
+                    max_tokens: None,
+                    temperature: Some(2.1),
+                    top_p: None,
+                },
+                "temperature",
+            ),
+            (
+                GenerationConfig {
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: Some(1.1),
+                },
+                "top_p",
+            ),
+        ];
+
+        for (config, expected_message) in invalid_configs {
+            let error = config.validate().expect_err("invalid generation config");
+            assert!(error.to_string().contains(expected_message));
+        }
+    }
 
     #[derive(Clone)]
     struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
