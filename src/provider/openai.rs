@@ -152,17 +152,8 @@ impl OpenAiClient {
     /// requires HTTPS; use [`Self::with_insecure_base_url`] only for trusted local or proxy
     /// endpoints that intentionally use HTTP.
     pub fn with_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
-        // Create a new config with the updated base_url using the current API key
-        let current_api_key = &self.responses_client.config.api_key;
-        let new_config = OpenAiConfig {
-            api_key: current_api_key.clone(),
-            base_url,
-            base_url_security: BaseUrlSecurity::HttpsOnly,
-            tool_calling_config: self.responses_client.config.tool_calling_config.clone(),
-            http_config: self.responses_client.config.http_config.clone(),
-            inspector_config: self.responses_client.config.inspector_config.clone(),
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self.responses_client.into_config().with_base_url(base_url);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 
@@ -173,48 +164,26 @@ impl OpenAiClient {
     /// Requests to this URL include the OpenAI API key in the `Authorization` header. Use this only
     /// for trusted local or proxy endpoints because the API key may be sent over plaintext HTTP.
     pub fn with_insecure_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
-        let current_api_key = &self.responses_client.config.api_key;
-        let new_config = OpenAiConfig {
-            api_key: current_api_key.clone(),
-            base_url,
-            base_url_security: BaseUrlSecurity::AllowInsecureHttp,
-            tool_calling_config: self.responses_client.config.tool_calling_config.clone(),
-            http_config: self.responses_client.config.http_config.clone(),
-            inspector_config: self.responses_client.config.inspector_config.clone(),
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self
+            .responses_client
+            .into_config()
+            .with_insecure_base_url(base_url);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 
     pub fn with_tool_calling_config(mut self, config: ToolCallingConfig) -> Result<Self, LlmError> {
-        let current_api_key = &self.responses_client.config.api_key;
-        let base_url = &self.responses_client.config.base_url;
-        let new_config = OpenAiConfig {
-            api_key: current_api_key.clone(),
-            base_url: base_url.clone(),
-            base_url_security: self.responses_client.config.base_url_security,
-            tool_calling_config: Some(config),
-            http_config: self.responses_client.config.http_config.clone(),
-            inspector_config: self.responses_client.config.inspector_config.clone(),
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self
+            .responses_client
+            .into_config()
+            .with_tool_calling_config(config);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Result<Self, LlmError> {
-        let current_api_key = &self.responses_client.config.api_key;
-        let base_url = &self.responses_client.config.base_url;
-        let tool_config = &self.responses_client.config.tool_calling_config;
-
-        let new_config = OpenAiConfig {
-            api_key: current_api_key.clone(),
-            base_url: base_url.clone(),
-            base_url_security: self.responses_client.config.base_url_security,
-            tool_calling_config: tool_config.clone(),
-            http_config: config,
-            inspector_config: self.responses_client.config.inspector_config.clone(),
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self.responses_client.into_config().with_http_config(config);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 }

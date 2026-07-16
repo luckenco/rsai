@@ -694,16 +694,8 @@ impl GeminiClient {
     /// requires HTTPS; use [`Self::with_insecure_base_url`] only for trusted local or proxy
     /// endpoints that intentionally use HTTP.
     pub fn with_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
-        let config = &self.completion_client.config;
-        let new_config = GeminiConfig {
-            api_key: config.api_key.clone(),
-            base_url,
-            base_url_security: BaseUrlSecurity::HttpsOnly,
-            tool_calling_config: config.tool_calling_config.clone(),
-            http_config: config.http_config.clone(),
-            inspector_config: config.inspector_config.clone(),
-        };
-        self.completion_client = CompletionClient::new(new_config)?;
+        let config = self.completion_client.into_config().with_base_url(base_url);
+        self.completion_client = CompletionClient::new(config)?;
         Ok(self)
     }
 
@@ -715,16 +707,11 @@ impl GeminiClient {
     /// only for trusted local or proxy endpoints because the API key may be sent over plaintext
     /// HTTP.
     pub fn with_insecure_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
-        let config = &self.completion_client.config;
-        let new_config = GeminiConfig {
-            api_key: config.api_key.clone(),
-            base_url,
-            base_url_security: BaseUrlSecurity::AllowInsecureHttp,
-            tool_calling_config: config.tool_calling_config.clone(),
-            http_config: config.http_config.clone(),
-            inspector_config: config.inspector_config.clone(),
-        };
-        self.completion_client = CompletionClient::new(new_config)?;
+        let config = self
+            .completion_client
+            .into_config()
+            .with_insecure_base_url(base_url);
+        self.completion_client = CompletionClient::new(config)?;
         Ok(self)
     }
 
@@ -732,30 +719,20 @@ impl GeminiClient {
         mut self,
         tool_config: ToolCallingConfig,
     ) -> Result<Self, LlmError> {
-        let config = &self.completion_client.config;
-        let new_config = GeminiConfig {
-            api_key: config.api_key.clone(),
-            base_url: config.base_url.clone(),
-            base_url_security: config.base_url_security,
-            tool_calling_config: Some(tool_config),
-            http_config: config.http_config.clone(),
-            inspector_config: config.inspector_config.clone(),
-        };
-        self.completion_client = CompletionClient::new(new_config)?;
+        let config = self
+            .completion_client
+            .into_config()
+            .with_tool_calling_config(tool_config);
+        self.completion_client = CompletionClient::new(config)?;
         Ok(self)
     }
 
     pub fn with_http_config(mut self, http_config: HttpClientConfig) -> Result<Self, LlmError> {
-        let config = &self.completion_client.config;
-        let new_config = GeminiConfig {
-            api_key: config.api_key.clone(),
-            base_url: config.base_url.clone(),
-            base_url_security: config.base_url_security,
-            tool_calling_config: config.tool_calling_config.clone(),
-            http_config,
-            inspector_config: config.inspector_config.clone(),
-        };
-        self.completion_client = CompletionClient::new(new_config)?;
+        let config = self
+            .completion_client
+            .into_config()
+            .with_http_config(http_config);
+        self.completion_client = CompletionClient::new(config)?;
         Ok(self)
     }
 
@@ -763,16 +740,11 @@ impl GeminiClient {
         mut self,
         inspector_config: InspectorConfig,
     ) -> Result<Self, LlmError> {
-        let config = &self.completion_client.config;
-        let new_config = GeminiConfig {
-            api_key: config.api_key.clone(),
-            base_url: config.base_url.clone(),
-            base_url_security: config.base_url_security,
-            tool_calling_config: config.tool_calling_config.clone(),
-            http_config: config.http_config.clone(),
-            inspector_config: Some(inspector_config),
-        };
-        self.completion_client = CompletionClient::new(new_config)?;
+        let config = self
+            .completion_client
+            .into_config()
+            .with_inspector_config(inspector_config);
+        self.completion_client = CompletionClient::new(config)?;
         Ok(self)
     }
 }
@@ -838,19 +810,21 @@ pub fn create_gemini_client_from_builder<State, Ctx>(
         .ok_or_else(|| LlmError::ProviderConfiguration("GEMINI_API_KEY not set.".to_string()))?
         .to_string();
 
-    let mut client = GeminiClient::new(api_key)?;
+    let mut config = GeminiConfig::new(api_key);
 
     if let Some(http_config) = builder.get_http_config() {
-        client = client.with_http_config(http_config.clone())?;
+        config = config.with_http_config(http_config.clone());
     }
 
     if let Some(tool_calling_config) = builder.get_tool_calling_config() {
-        client = client.with_tool_calling_config(tool_calling_config.clone())?;
+        config = config.with_tool_calling_config(tool_calling_config.clone());
     }
 
     if let Some(inspector_config) = builder.get_inspector_config() {
-        client = client.with_inspector_config(inspector_config.clone())?;
+        config = config.with_inspector_config(inspector_config.clone());
     }
 
-    Ok(client)
+    Ok(GeminiClient {
+        completion_client: CompletionClient::new(config)?,
+    })
 }

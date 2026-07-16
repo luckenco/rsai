@@ -116,6 +116,10 @@ impl<P: CompletionProviderConfig> CompletionClient<P> {
         Ok(Self { config, http })
     }
 
+    pub(crate) fn into_config(self) -> P {
+        self.config
+    }
+
     /// Make an API request using the given request builder.
     pub async fn make_api_request<B: CompletionRequestBuilder>(
         &self,

@@ -182,24 +182,8 @@ impl OpenRouterClient {
     /// method requires HTTPS; use [`Self::with_insecure_base_url`] only for trusted local or proxy
     /// endpoints that intentionally use HTTP.
     pub fn with_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
-        // Create a new config with the updated base_url using the current API key
-        let current_api_key = &self.responses_client.config.api_key;
-        let http_referer = self.responses_client.config.http_referer.clone();
-        let x_title = self.responses_client.config.x_title.clone();
-        let http_config = self.responses_client.config.http_config.clone();
-        let inspector_config = self.responses_client.config.inspector_config.clone();
-
-        let new_config = OpenRouterConfig {
-            api_key: current_api_key.clone(),
-            base_url,
-            base_url_security: BaseUrlSecurity::HttpsOnly,
-            http_referer,
-            x_title,
-            tool_calling_config: self.responses_client.config.tool_calling_config.clone(),
-            http_config,
-            inspector_config,
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self.responses_client.into_config().with_base_url(base_url);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 
@@ -211,23 +195,11 @@ impl OpenRouterClient {
     /// only for trusted local or proxy endpoints because the API key may be sent over plaintext
     /// HTTP.
     pub fn with_insecure_base_url(mut self, base_url: String) -> Result<Self, LlmError> {
-        let current_api_key = &self.responses_client.config.api_key;
-        let http_referer = self.responses_client.config.http_referer.clone();
-        let x_title = self.responses_client.config.x_title.clone();
-        let http_config = self.responses_client.config.http_config.clone();
-        let inspector_config = self.responses_client.config.inspector_config.clone();
-
-        let new_config = OpenRouterConfig {
-            api_key: current_api_key.clone(),
-            base_url,
-            base_url_security: BaseUrlSecurity::AllowInsecureHttp,
-            http_referer,
-            x_title,
-            tool_calling_config: self.responses_client.config.tool_calling_config.clone(),
-            http_config,
-            inspector_config,
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self
+            .responses_client
+            .into_config()
+            .with_insecure_base_url(base_url);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 
@@ -242,40 +214,17 @@ impl OpenRouterClient {
     }
 
     pub fn with_tool_calling_config(mut self, config: ToolCallingConfig) -> Result<Self, LlmError> {
-        let current_api_key = &self.responses_client.config.api_key;
-        let base_url = &self.responses_client.config.base_url;
-        let http_referer = self.responses_client.config.http_referer.clone();
-        let x_title = self.responses_client.config.x_title.clone();
-        let http_config = self.responses_client.config.http_config.clone();
-        let inspector_config = self.responses_client.config.inspector_config.clone();
-
-        let new_config = OpenRouterConfig {
-            api_key: current_api_key.clone(),
-            base_url: base_url.clone(),
-            base_url_security: self.responses_client.config.base_url_security,
-            http_referer,
-            x_title,
-            tool_calling_config: Some(config),
-            http_config,
-            inspector_config,
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self
+            .responses_client
+            .into_config()
+            .with_tool_calling_config(config);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 
     pub fn with_http_config(mut self, config: HttpClientConfig) -> Result<Self, LlmError> {
-        let current_config = &self.responses_client.config;
-        let new_config = OpenRouterConfig {
-            api_key: current_config.api_key.clone(),
-            base_url: current_config.base_url.clone(),
-            base_url_security: current_config.base_url_security,
-            http_referer: current_config.http_referer.clone(),
-            x_title: current_config.x_title.clone(),
-            tool_calling_config: current_config.tool_calling_config.clone(),
-            http_config: config,
-            inspector_config: current_config.inspector_config.clone(),
-        };
-        self.responses_client = ResponsesClient::new(new_config)?;
+        let config = self.responses_client.into_config().with_http_config(config);
+        self.responses_client = ResponsesClient::new(config)?;
         Ok(self)
     }
 }
