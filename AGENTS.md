@@ -1,3 +1,12 @@
+- Keep things modular.
+- Define clear, testable contract boundaries. Document public contracts, and ensure Rustdoc examples compile and run as doctests.
+- Use assertions for invariants when encoding within types is not feasible.
+- Use clippy and fix code smells reported.
+- Prefer iterators, monadic logic, and functional concepts. Where not possible for performance, document why.
+- Make invalid state unrepresentable.
+- Prefer importing modules over long lists of types. Using `module::Type` at call sites is fine, keeps names unambiguous, and reduces namespace-collision churn.
+- Be wary of designs that will not scale. Report the limiting assumption, expected failure mode, and likely impact to the user.
+
 # Repository Guidelines
 
 ## Project Structure & Module Organization
