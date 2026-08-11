@@ -20,7 +20,7 @@ rsai requires Rust 1.97 or newer.
 
 ```toml
 [dependencies]
-rsai = "0.4"
+rsai = "0.5"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # Required when using #[completion_schema]

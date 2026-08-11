@@ -6,7 +6,7 @@
 //! - Use OpenRouter-specific headers (HTTP-Referer, X-Title)
 //! - Generate structured output
 
-use dotenv::dotenv;
+use dotenvy::dotenv;
 
 use rsai::{ApiKey, ChatRole, Message, Provider, completion_schema, llm};
 

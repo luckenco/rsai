@@ -1,4 +1,4 @@
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use rsai::{ApiKey, ChatRole, HttpClientConfig, Message, Provider, completion_schema, llm};
 use std::time::Duration;
 

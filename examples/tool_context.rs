@@ -63,7 +63,7 @@ fn add(a: i32, b: i32) -> i32 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     // Create context with dependencies
     let ctx = AppContext {

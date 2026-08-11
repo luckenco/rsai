@@ -1,4 +1,4 @@
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use rsai::{ApiKey, ChatRole, Message, Provider, completion_schema, llm, tool, toolset};
 
 #[tool]

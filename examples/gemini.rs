@@ -1,6 +1,6 @@
 //! Example demonstrating Google Gemini provider with function calling.
 
-use dotenv::dotenv;
+use dotenvy::dotenv;
 
 use rsai::{ApiKey, ChatRole, Message, Provider, TextResponse, llm, tool, toolset};
 

@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "rsai"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Constantin Luckenbach <cluckenbach@protonmail.com>"]
 edition = "2024"
 rust-version = "1.97"
@@ -22,7 +22,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 schemars = "1.2.1"
 
 [dependencies]
-rsai-macros = { path = "macros", version = "0.4.0" }
+rsai-macros = { path = "macros", version = "0.5.0" }
 async-trait = "0.1.89"
 futures = "0.3.32"
 rand = "0.10.2"
@@ -35,7 +35,7 @@ tokio = { version = "1.52.3", features = ["rt", "time"] }
 tracing = "0.1.44"
 
 [dev-dependencies]
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 wiremock = "0.6.5"

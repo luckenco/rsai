@@ -4,7 +4,7 @@
 ///  • RUST_LOG=info cargo run --example tracing for info-level logs
 ///  • RUST_LOG=debug cargo run --example tracing for detailed debug information
 ///  • RUST_LOG=rsai=debug cargo run --example tracing to specifically debug the rsai library
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use rsai::{ApiKey, ChatRole, Message, Provider, completion_schema, llm, tool, toolset};
 
 #[tool]

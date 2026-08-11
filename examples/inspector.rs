@@ -7,7 +7,7 @@
 ///  • Monitoring tool-calling loop iterations
 ///
 /// Run with: cargo run --example inspector
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use rsai::{ApiKey, ChatRole, Message, Provider, TextResponse, llm, tool, toolset};
 
 #[tool]
